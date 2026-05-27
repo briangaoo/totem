@@ -95,7 +95,7 @@ whoop-mcp ping    # is my deployment alive?
 
 See [The `whoop-mcp` CLI](#the-whoop-mcp-cli) for the full command reference.
 
-Full walkthrough with troubleshooting: [Setup](#setup). Want to host it on a remote URL so you can use it from multiple devices? See [Remote hosting](#remote-hosting).
+Want to host it on a remote URL so you can use it from multiple devices? See [Remote hosting](#remote-hosting). Stuck? Jump to [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -109,128 +109,55 @@ Full walkthrough with troubleshooting: [Setup](#setup). Want to host it on a rem
 6. [Authentication](#authentication)
 7. [Write-safety harness](#write-safety-harness)
 8. [Bundled catalogs](#bundled-catalogs)
-9. [Setup](#setup)
-10. [Configuration](#configuration)
-11. [Remote hosting](#remote-hosting)
-12. [The `whoop-mcp` CLI](#the-whoop-mcp-cli)
-13. [Example conversations](#example-conversations)
-14. [Project structure](#project-structure)
-15. [Development guide](#development-guide)
-16. [Testing](#testing)
-17. [Error handling](#error-handling)
-18. [Token usage analysis](#token-usage-analysis)
-19. [Privacy + security](#privacy--security)
-20. [Troubleshooting](#troubleshooting)
-21. [Comparison to alternatives](#comparison-to-alternatives)
-22. [Roadmap](#roadmap)
-23. [FAQ](#faq)
-24. [Going deeper](#going-deeper)
-25. [Disclaimers](#disclaimers)
-26. [Acknowledgments](#acknowledgments)
+9. [Configuration](#configuration)
+10. [Remote hosting](#remote-hosting)
+11. [The `whoop-mcp` CLI](#the-whoop-mcp-cli)
+12. [Privacy + security](#privacy--security)
+13. [Troubleshooting](#troubleshooting)
+14. [Comparison to alternatives](#comparison-to-alternatives)
+15. [FAQ](#faq)
+16. [Disclaimers](#disclaimers)
+17. [Acknowledgments](#acknowledgments)
 
-**Other root-level docs:** [`WHOOP_API_ENDPOINTS.md`](WHOOP_API_ENDPOINTS.md) (5,900-line API reference) · [`CHANGELOG.md`](CHANGELOG.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`LICENSE`](LICENSE)
+**Other root-level docs:** [`WHOOP_API_ENDPOINTS.md`](WHOOP_API_ENDPOINTS.md) (full API reference) · [`CHANGELOG.md`](CHANGELOG.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`LICENSE`](LICENSE)
 
 ---
 
 ## Why this exists
 
-Whoop ships two APIs.
+Whoop ships two APIs:
 
-**The public developer API** at [`developer.whoop.com`](https://developer.whoop.com/api/) is OAuth2-based, returns 429 on overage (threshold not published), is read-only, and exposes exactly **13 endpoints** under 6 scopes (`read:recovery`, `read:cycles`, `read:workout`, `read:sleep`, `read:profile`, `read:body_measurement`):
+- The **public developer API** at [`developer.whoop.com`](https://developer.whoop.com/api/) is OAuth2, read-only, and exposes **13 endpoints** under 6 scopes. You get recovery score, sleep stage totals, workout strain, body measurements (3 fields), and HRV/RHR per cycle. No journal, no Strength Trainer, no Whoop Coach, no hypnogram, no stress monitor, no trends, no writes, nothing else. Numeric `sport_id` was removed 2025-09-01.
+- The **private iOS API** is what the actual Whoop app uses — `api.prod.whoop.com` behind AWS Cognito. **384 distinct operations across 47 microservices**, including everything missing from above.
 
-- `GET /v2/user/profile/basic` → `{user_id, email, first_name, last_name}`
-- `GET /v2/user/measurement/body` → `{height_meter, weight_kilogram, max_heart_rate}` (no resting HR)
-- `DELETE /v2/user/access` → revokes the OAuth grant
-- `GET /v2/cycle` (paginated, ≤25/page) + `GET /v2/cycle/{id}` → strain, kJ, avg/max HR
-- `GET /v2/cycle/{id}/sleep`, `GET /v2/cycle/{id}/recovery`
-- `GET /v2/recovery` (paginated) → recovery score, RHR, HRV (rmssd milli), SpO2, skin_temp, calibrating flag
-- `GET /v2/activity/sleep` + `GET /v2/activity/sleep/{id}` → stage totals (REM/light/SWS/wake/in-bed/no-data milli), cycle count, disturbance count, sleep_needed breakdown, performance/consistency/efficiency %, respiratory rate
-- `GET /v2/activity/workout` + `GET /v2/activity/workout/{id}` → strain, kJ, avg/max HR, percent_recorded, distance/altitude, **zone_duration** array, sport_name (numeric `sport_id` removed 2025-09-01)
-- `GET /v1/activity-mapping/{v1Id}` → bridges legacy long IDs → v2 UUIDs
+This MCP wraps the iOS surface.
 
-Plus **6 webhook events** (v2 only — v1 webhooks removed): `recovery.{updated,deleted}`, `workout.{updated,deleted}`, `sleep.{updated,deleted}`, each carrying `{user_id, id, type, trace_id}`.
+### What the iOS API has that the public OAuth doesn't
 
-**What the public OAuth API does NOT have:**
-journal (308 behaviors) · behavior impact analysis · stress monitor · Whoop Coach · per-minute hypnogram (only stage totals) · trends (25-metric series) · compare-windows · smart alarm CRUD · HR zone config · hidden metrics / stealth mode · profile editing · Strength Trainer (sets/reps/weight/PRs) · custom exercises · workout templates · activity create/delete writes · journal logging · cycle/symptom logging (women's health) · communities / leaderboards · performance assessment · live HR/state/stress · sleep coach (recommended bedtime) · calendar month grid · MCI / hormonal insights · body composition / VO2 / weight trends · achievements / streaks / data quality.
+| Capability | Tool |
+|---|---|
+| HRV / RHR / respiratory / VO2 / weight time-series (25 metrics × up to 4 windows) | `whoop_trend` |
+| Hypnogram (per-minute sleep stage timeline) | `whoop_sleep` |
+| Strength Trainer — every set, every workout, full 372-exercise catalog, PRs | `whoop_lift_*` (8 tools) |
+| 308-behavior Journal + behavior impact analysis | `whoop_journal*` (5 tools) |
+| Stress monitor (15-min buckets) | `whoop_stress, whoop_live_stress` |
+| Whoop Coach AI chat | `whoop_coach_ask` |
+| Smart Alarm (read + 4 write modes) | `whoop_smart_alarm*` |
+| HR zones (read + configure max HR / 5 custom zones) | `whoop_hr_zones*` |
+| Compare-windows, sleep coach, calendar grid, performance assessment | `whoop_compare`, `whoop_sleep_need`, `whoop_calendar`, `whoop_performance_assessment` |
+| Live HR / activity state / live stress | `whoop_live_*` (3 tools) |
+| Community leaderboards, hidden metrics, women's health (cycle / symptoms / MCI) | `whoop_leaderboard`, `whoop_hidden_metric`, `whoop_cycle*` |
+| **14 write tools** — log workouts, journal entries, profile edits, smart-alarm config | various |
 
-**The private iOS API** is what the actual Whoop app uses — `api.prod.whoop.com` behind AWS Cognito auth. It exposes **384 distinct operations** (after deduplication; raw mitm captures saw ~419 before merging body-shape variants) across **47 microservices**, including:
-
-- **Strength Trainer** — every set of every workout, exercise-by-exercise volume progression, the full 372-exercise official catalog, custom exercise creation, template library, PRs with medals
-- **The 308-behavior Journal** — every trackable behavior with its impact on recovery/HRV/sleep, full CRUD on daily entries
-- **Hypnogram-level sleep data** — minute-by-minute sleep stage timeline, sleep HR and HRV averages, respiratory rate during sleep, latency, disturbances, debt
-- **Stress monitor** — 15-minute-bucket stress timeline, calibration state, baseline
-- **Smart Alarm** — full schedule CRUD, preferences, master enable/disable
-- **Live HR + activity state** — current heart rate from the strap, current activity (workout / sleep / idle / recovery)
-- **Whoop Coach** — the AI chat assistant inside the app, with full conversation history
-- **Hidden metrics** — body composition, healthspan, stealth mode toggles
-- **Health monitor** — weekly HRV / RHR / respiratory rate trends with insights
-- **Performance assessment** — month-over-month coaching evaluations
-- **Hormonal insights / MCI** — women's-health features, cycle tracking, symptom logging
-- **Community leaderboards** — every metric × every window, with your rank
-- **Followers + social graph**
-- **Trend deep dives** — 25 distinct metrics over up to four windows (week / month / six_month / year — most metrics return 3 segments, a few return 2)
-- **HR zones** — read + write, max HR auto-zones or custom 5-zone bands
-- **Profile editing** — name, birthday, gender, height/weight, country/state, avatar
-- **Behavior impact analysis** — "your alcohol intake last night likely dropped recovery by 12%"
-- **Achievements + data streaks**
-
-This MCP wraps the **iOS surface**, not the public OAuth one. That's the entire reason it exists.
-
-### How was the iOS API reverse-engineered?
-
-Short version: **mitmproxy + iPhone + Whoop's lack of SSL certificate pinning**. The full methodology, including which capture sessions revealed what, the dedup pipeline, the agent-based analysis, and the captured response fixtures, is documented in [`WHOOP_API_ENDPOINTS.md`](WHOOP_API_ENDPOINTS.md).
-
-### Why use the iOS API instead of the public one?
-
-Verified by fetching the live OAuth API docs and probing every endpoint (see "Comparison source" at the end of the table):
-
-| Feature | Public OAuth (v2) | iOS API | This MCP |
-|---|---|---|---|
-| Recovery score, RHR, HRV (rmssd), SpO2, skin_temp | ✓ | ✓ | `whoop_recovery` |
-| **HRV time-series across days** | ✗ (only per-cycle) | ✓ | `whoop_trend` (25 metrics × up to 4 windows) |
-| Sleep cycle (start/end, performance/consistency/efficiency %) | ✓ | ✓ | `whoop_sleep` |
-| Sleep stage **totals** (REM/light/SWS/wake/in-bed milli) | ✓ | ✓ | `whoop_sleep` |
-| **Hypnogram (per-minute stage timeline)** | ✗ (only totals) | ✓ | `whoop_sleep` |
-| Workout list (paginated) | ✓ (≤25/page) | ✓ | `whoop_workouts` |
-| Workout detail (strain, kJ, avg/max HR, zone_duration, distance, altitude) | ✓ | ✓ | `whoop_workout` |
-| Workout numeric `sport_id` | ✗ removed 2025-09-01 | ✓ | `whoop_workouts` (via private API) |
-| Body measurements (height, weight, max HR) | ✓ (3 fields) | ✓ (30+ fields) | `whoop_profile` |
-| **Resting HR (current)** | ✗ | ✓ | `whoop_profile, whoop_recovery` |
-| Cycle (strain, kJ, avg/max HR) | ✓ | ✓ | `whoop_today, whoop_strain` |
-| **Strength Trainer set/rep/weight + PRs** | ✗ | ✓ | `whoop_lift_*` (8 tools) |
-| **372-exercise catalog** | ✗ | ✓ | `whoop_lift_catalog` |
-| **308-behavior Journal** | ✗ | ✓ | `whoop_journal*` (5 tools) |
-| **Behavior impact analysis** | ✗ | ✓ | `whoop_behavior_impact` |
-| **Stress monitor (15-min buckets)** | ✗ | ✓ | `whoop_stress, whoop_live_stress` |
-| **Whoop Coach AI chat** | ✗ | ✓ | `whoop_coach_ask` |
-| **Smart Alarm read + write** | ✗ | ✓ | `whoop_smart_alarm*` |
-| **HR zones (read + config)** | ✗ | ✓ | `whoop_hr_zones, whoop_hr_zones_set` |
-| **Compare two windows side-by-side** | ✗ | ✓ | `whoop_compare` |
-| **Sleep coach (recommended bedtime)** | partial (raw `sleep_needed`) | ✓ | `whoop_sleep_need` |
-| **Calendar month grid** | ✗ | ✓ | `whoop_calendar` |
-| **Performance assessment (WEEK/MONTH)** | ✗ | ✓ | `whoop_performance_assessment` |
-| **Live HR / activity state / live stress** | ✗ | ✓ | `whoop_live_*` (3 tools) |
-| **Community leaderboards** (9 window×metric combos) | ✗ | ✓ | `whoop_leaderboard` |
-| **Hidden metrics + stealth mode** | ✗ | ✓ | `whoop_hidden_metric` |
-| **Women's health: cycle, symptoms, MCI** | ✗ | ✓ | `whoop_cycle*, whoop_symptom_log` |
-| **Write surface (any kind)** | ✗ | ✓ | 14 write tools |
-| **Webhooks** (sleep/workout/recovery updated+deleted) | ✓ 6 events | ✗ (push notifications instead) | not exposed by MCP |
-| Pagination | required (≤25/page, `nextToken`) | mostly absent | n/a |
-| Rate limits | 429 exists (threshold not published) | none observed | n/a |
-| Auth | OAuth2 client registration + scopes | Cognito proxy + auto-refresh | handled |
-| Endpoint count | 13 | 384 deduped (47 microservices) | 47 MCP tools (incl. 2 escape hatches) |
-
-**Comparison source.** Public-API column was extracted from [developer.whoop.com/api](https://developer.whoop.com/api/) and the per-resource docs at `/docs/developing/user-data/{recovery,sleep,workout,cycle}/` on 2026-05-25. iOS column was captured via mitmproxy across three sessions in May 2026 and is documented in [`WHOOP_API_ENDPOINTS.md`](WHOOP_API_ENDPOINTS.md). Enums and ID-format claims were verified live against a test account (the raw probe scripts and the 309-variant test matrix live in the separate `whoop-testing` archive — they require a dummy account and aren't shipped with the prod MCP).
-
-If you don't care about anything in the bottom half of the table, the public API is fine and you should use it. If any row in the bottom half is interesting, you need this.
+If recovery + sleep totals + workout list is enough for you, use the public OAuth API. If anything in the table is interesting, you need this. The iOS API was discovered via mitmproxy — full methodology in [`WHOOP_API_ENDPOINTS.md`](WHOOP_API_ENDPOINTS.md).
 
 ---
 
 ## What it does
 
-The MCP runs as a local Node process. It speaks the **Model Context Protocol** over stdio, registers 47 tools at startup, and waits for tool calls from a connected MCP client (Claude Desktop, Claude Code, etc).
+The MCP runs as a local Node process. It speaks **Model Context Protocol** over stdio (or HTTP for remote deployments), registers 47 tools at startup, and waits for tool calls from a connected MCP client.
 
-When a tool is called, it:
+When a tool is called:
 
 1. Authenticates via the cached Cognito access token (auto-refreshes if expired)
 2. Issues HTTP requests to `api.prod.whoop.com`
@@ -238,333 +165,41 @@ When a tool is called, it:
 4. Validates the projected object against a zod schema (catches Whoop API drift)
 5. Returns the structured JSON to the MCP client
 
-Writes follow the same path, plus a **preview gate**: every write tool defaults `confirm: false`, returning a preview of what would be sent. Claude must explicitly re-call with `confirm: true` to fire the actual request.
+Writes follow the same path plus a **preview gate**: every write tool defaults `confirm: false`, returning a preview of what would be sent. Claude must explicitly re-call with `confirm: true` to fire.
 
-### One-line summary per major capability
-
-| Capability | What it does | Tool(s) |
-|---|---|---|
-| Today snapshot | Combined recovery + sleep + strain + current state | `whoop_today` |
-| Historical day snapshot | Same but for any past date | `whoop_day` |
-| Identity | Bootstrap + bio data + privacy state | `whoop_profile` |
-| Calendar month | Per-day score grid | `whoop_calendar` |
-| Recovery deep dive | Score, HRV, RHR, respiratory rate, contributors | `whoop_recovery` |
-| Sleep deep dive | Stages, hypnogram, efficiency, performance, disturbances | `whoop_sleep` |
-| Strain deep dive | Score, HR-zone time buckets, steps, strength time, workouts count | `whoop_strain` |
-| Trend any metric | 25-metric × up-to-4-window data series | `whoop_trend` |
-| Compare windows | Side-by-side metric comparison | `whoop_compare` |
-| Stress monitor | 15-min bucket timeline + current level | `whoop_stress, whoop_live_stress` |
-| Sleep coach | Recommended bedtime + sleep need breakdown | `whoop_sleep_need` |
-| Live HR | Current bpm + zone if strap is recording | `whoop_live_hr` |
-| Activity state | Currently in a workout / sleep / idle | `whoop_live_state` |
-| Workout list | Recent activities with strain + HR + calories | `whoop_workouts` |
-| Workout detail | Full HR curve, zones, MSK breakdown | `whoop_workout` |
-| Create activity | Log a generic activity (manual entry) | `whoop_activity_create` |
-| Delete activity | Remove an activity | `whoop_activity_delete` |
-| Sport catalog | 203-sport `sport_id` ↔ name lookup | `whoop_sports_catalog` |
-| PRs | All Strength Trainer PRs with medals | `whoop_lift_prs` |
-| Exercise composite | Meta + history + PRs in one call | `whoop_lift_exercise` |
-| Exercise progression | Volume trend over windows | `whoop_lift_progression` |
-| Strength history | Recent strength workouts with per-exercise aggregates (set count, total reps, tonnage, medals) | `whoop_lift_history` |
-| Templates | Saved workout templates | `whoop_lift_library` |
-| Exercise catalog | 372-exercise bundled catalog with search | `whoop_lift_catalog` |
-| Log strength workout | Save a finished workout with all sets | `whoop_lift_log` |
-| Save template | Create or save-as a template | `whoop_lift_template_save` |
-| Create custom exercise | Add a custom exercise based on an official one | `whoop_lift_custom_exercise` |
-| Journal entry | Tracked behaviors for a date with values | `whoop_journal` |
-| Behavior catalog | 308-behavior bundled catalog with search | `whoop_journal_catalog` |
-| Behavior impact | Per-behavior recovery / HRV / sleep correlations | `whoop_behavior_impact` |
-| Log journal | Save full daily journal entry | `whoop_journal_log` |
-| Autopop journal | Trigger Whoop's HealthKit-based suggestion engine | `whoop_journal_autopop` |
-| Cycle status | Phase, day, prediction, hormonal mode | `whoop_cycle` |
-| Log period/ovulation | Cycle entry | `whoop_cycle_log` |
-| Log symptoms | Women's-health symptom + flow log | `whoop_symptom_log` |
-| Coach ask | Send a question to Whoop Coach | `whoop_coach_ask` |
-| Performance assessment | Weekly or monthly coaching summary (YEAR rejected by API) | `whoop_performance_assessment` |
-| Smart alarm read | Schedules + preferences | `whoop_smart_alarm` |
-| Smart alarm write | 4 modes (schedule / prefs / master_enable / master_disable) | `whoop_smart_alarm_set` |
-| Leaderboard | Community ranking + your position | `whoop_leaderboard` |
-| HR zones read | Max HR + 5 zone ranges | `whoop_hr_zones` |
-| HR zones write | Set max HR (auto-zones) or 5 custom zones | `whoop_hr_zones_set` |
-| Profile update | Name / birthday / gender / weight / height / location | `whoop_profile_update` |
-| Hidden metric | Show / hide BODY_COMP or HEALTHSPAN | `whoop_hidden_metric` |
-| Raw API | Call any of the 384 endpoints directly | `whoop_raw` |
-| Endpoint search | Search the bundled endpoint catalog | `whoop_endpoints` |
+See [The 47 tools](#the-47-tools) for the full per-tool reference.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│         Claude Desktop / Claude Code        │
-│                                             │
-│  ┌───────────────────────────────────────┐  │
-│  │   MCP client (built into Claude)      │  │
-│  └───────────────────────────────────────┘  │
-└─────────────────┬───────────────────────────┘
-                  │ stdio (JSON-RPC)
-                  │
-        ┌─────────▼─────────┐
-        │  src/server.ts    │  Node 24 process
-        │  (MCP entry)      │
-        └─────────┬─────────┘
-                  │
-        ┌─────────▼──────────┐
-        │  registerTools()   │  src/tools/register.ts
-        │  47 tool handlers  │
-        └─────────┬──────────┘
-                  │
-   ┌──────────────┼──────────────────────┐
-   │              │                      │
-   ▼              ▼                      ▼
-┌────────┐   ┌─────────┐         ┌──────────────┐
-│schemas │   │projections│       │  whoop/      │
-│(zod)   │   │(raw→flat) │       │  client      │
-└────────┘   └─────────┘         └──────┬───────┘
-                                        │ HTTPS + Bearer
-                                        │
-                                        ▼
-                            ┌──────────────────────┐
-                            │ api.prod.whoop.com   │
-                            │ (47 microservices)   │
-                            └──────────────────────┘
+Claude Desktop / Code  ──stdio──▶  src/server.ts  ──▶  47 tool handlers
+                                                          │
+                                       ┌──────────────────┼──────────────────┐
+                                       ▼                  ▼                  ▼
+                                  schemas (zod)    projections (raw→flat)  whoop/client
+                                                                              │
+                                                                              ▼ HTTPS
+                                                                       api.prod.whoop.com
 ```
 
-### Three-layer per-tool architecture
+### Three layers per tool
 
-Every tool follows the same pattern. Take `whoop_recovery` as an example:
+Every tool is a schema + projection + handler:
 
-**1. Schema (`src/schemas/recovery.ts`)**
+- **`src/schemas/<tool>.ts`** — zod schema. The contract Claude sees. Used at runtime to validate the projection's output before returning.
+- **`src/projections/<tool>.ts`** — pure function turning Whoop's raw BFF response into a flat object. All the "Whoop puts this data over there, not where you'd expect" knowledge lives here. Tested against captured fixtures.
+- **`src/tools/v2/<tool>.ts`** — ~25-100 lines. Registers the tool, parses input args, calls the client, runs the projection, validates with zod, returns.
 
-```ts
-import { z } from "zod";
+Almost no logic in the tool file. That's all in the projection — which makes the codebase highly testable (projections are pure transformations, tested against `tests/fixtures/*.json` without hitting the network).
 
-export const RecoveryOut = z.object({
-  date: z.iso.date(),
-  score: z.number().nullable(),
-  state: z.enum(["GREEN", "YELLOW", "RED"]).nullable(),
-  hrv: z.object({
-    ms: z.number().nullable(),
-    baseline_ms: z.number().nullable(),
-    delta_pct: z.number().nullable(),
-  }),
-  rhr: z.object({
-    bpm: z.number().nullable(),
-    baseline_bpm: z.number().nullable(),
-    delta_pct: z.number().nullable(),
-  }),
-  respiratory_rate: z.number().nullable(),
-  spo2_pct: z.number().nullable(),
-  skin_temp_c: z.number().nullable(),
-  sleep_performance_pct: z.number().nullable(),
-  contributors: z.array(z.object({
-    name: z.string(),
-    direction: z.enum(["positive", "negative", "neutral"]),
-    detail: z.string().nullable(),
-  })),
-  calibration_state: z.enum(["CALIBRATING", "CALIBRATED"]).nullable(),
-});
-export type RecoveryOutT = z.infer<typeof RecoveryOut>;
-```
+### Shape drift handling
 
-The schema is the **contract** between the tool and Claude. It's used at runtime to validate that the projection produced data of the expected shape, and it's documentation — anyone reading `src/schemas/` knows exactly what each tool returns.
+When Whoop changes a response shape, the projection emits unexpected data, zod's `.parse()` fails, and the MCP throws `WhoopProjectionError` instead of silently returning malformed data to Claude. Fix: use `whoop_raw` + `whoop_endpoints` to capture the new shape, update the projection, update the fixture, ship.
 
-**2. Projection (`src/projections/recovery.ts`)**
+> **Recent example:** in May 2026, Whoop migrated recovery + strain deep-dives from `GRAPHING_CARD` tiles (keyed by `content.title` like `"RECOVERY"`) to `SCORE_GAUGE` + `CONTRIBUTORS_TILE` items with stable `content.id` keys (`RECOVERY_SCORE_GAUGE`, `CONTRIBUTORS_TILE_HRV`). Other deep-dives still use the old card-based shape. The escape-hatch tools made the migration trivial to debug.
 
-```ts
-import type { RecoveryOutT } from "../schemas/recovery.js";
-import { isObject, asArray, asString } from "../lib/walk.js";
-
-export function projectRecovery(raw: unknown, date: string): RecoveryOutT {
-  // Walk every nested item with a `type` field, collecting {type, content} pairs.
-  const items = collectItems(raw);
-  // Recovery score lives in SCORE_GAUGE { id: "RECOVERY_SCORE_GAUGE" }.
-  const gauge = items.find(it => it.type === "SCORE_GAUGE" && it.content.id === "RECOVERY_SCORE_GAUGE");
-  const score = parseNumber(gauge?.content.score_display);
-  // HRV / RHR / respiratory / sleep_performance live in CONTRIBUTORS_TILE metrics[].
-  const contributors = items.find(it => it.type === "CONTRIBUTORS_TILE" && it.content.id === "RECOVERY_CONTRIBUTORS_TILE");
-  const metrics = contributors?.content.metrics ?? [];
-  // status = today's value, status_subtitle = baseline (API-provided).
-  return { date, score, state, hrv, rhr, respiratory_rate, sleep_performance_pct, ... };
-}
-```
-
-The projection function takes Whoop's deep-dive BFF response and emits a flat object. This is where all the "Whoop returns the data here, not where you'd expect" knowledge lives.
-
-**Whoop migrated this shape in May 2026.** The recovery + strain deep-dive responses used to be `GRAPHING_CARD` tiles keyed by `content.title` (e.g. `"RECOVERY"`, `"HEART RATE VARIABILITY"`, `"STRAIN"`, `"CALORIES"`, `"HR ZONES 1-3"`). The new shape uses `SCORE_GAUGE` + `CONTRIBUTORS_TILE` items with stable `content.id` keys (`RECOVERY_SCORE_GAUGE`, `CONTRIBUTORS_TILE_HRV`, etc.). Other deep-dives (sleep, stress) still use the old card-based shape. When projections fail silently after a Whoop migration like this, the `whoop_endpoints` + `whoop_raw` escape hatch lets you fetch the new shape and inspect it before rewriting the projection — see [Fixing a broken projection](#fixing-a-broken-projection).
-
-**3. Tool (`src/tools/v2/recovery.ts`)**
-
-```ts
-import { z } from "zod";
-import { RecoveryOut } from "../../schemas/recovery.js";
-import { projectRecovery } from "../../projections/recovery.js";
-import { WhoopProjectionError } from "../../whoop/errors.js";
-import { jsonOut } from "../../whoop/json_out.js";
-import { todayIso } from "../../lib/dates.js";
-
-export function registerRecovery(server: McpServer, client: WhoopClient): void {
-  server.tool(
-    "whoop_recovery",
-    "Recovery deep-dive: score, HRV, RHR, respiratory rate, contributors.",
-    { date: z.iso.date().optional() },
-    async ({ date }) => {
-      const d = date ?? todayIso();
-      const raw = await client.get("/home-service/v1/deep-dive/recovery", { date: d });
-      const projected = projectRecovery(raw, d);
-      try {
-        const out = RecoveryOut.parse(projected);
-        return { content: [{ type: "text", text: jsonOut(out) }] };
-      } catch (e) {
-        if (e instanceof z.ZodError) throw new WhoopProjectionError("whoop_recovery", e);
-        throw e;
-      }
-    },
-  );
-}
-```
-
-The tool file for `whoop_recovery` is **~25 lines**. Tool files range from 26 to 116 lines depending on schema complexity (e.g., `whoop_smart_alarm_set` has 4 modes and is 103 lines; `whoop_coach_ask` polls for results and is 116). They register the tool with the MCP server, parse input arguments, call the client, run the projection, validate with zod, and return. Almost no logic — that all lives in projection.
-
-This separation makes the codebase highly testable. Projection functions are pure transformations of raw API responses — they're tested against captured fixtures in `tests/fixtures/*.json` without ever hitting the network. See `tests/projections/round{1,2,3}.test.ts`.
-
-### Where each piece lives
-
-```
-src/
-├── server.ts               # 42 lines: dotenv → TokenManager → WhoopClient → McpServer
-├── whoop/                  # The "transport + auth" layer (unchanged from v1)
-│   ├── client.ts           # HTTP wrapper, error classification, 30s timeout
-│   ├── cognito.ts          # Cognito proxy auth (no AWS SDK, no client secret)
-│   ├── token_manager.ts    # Auto-refresh, single-flight, .env persistence
-│   ├── write_safety.ts     # preview() + withPreview() helpers
-│   ├── build_lift_body.ts  # 84 lines: builds Whoop's nested workout_groups[].workout_exercises[].sets[] body; denormalizes EXERCISES_BY_ID into each exercise_details
-│   ├── errors.ts           # 5 error classes (Auth, Server, Api, Schema, Projection)
-│   ├── json_out.ts         # JSON.stringify thin wrapper
-│   ├── constants.ts        # BASE_URL, API_VERSION=7, REQUEST_TIMEOUT_MS
-│   └── types.ts            # BootstrapSchema, ExerciseInfoSchema (reused zod)
-│
-├── data/                   # Bundled catalogs (auto-generated)
-│   ├── behaviors.ts        # 308 journal behaviors + BEHAVIORS_BY_ID + BEHAVIORS_BY_NAME
-│   ├── exercises.ts        # 372 official Strength Trainer exercises + EXERCISES_BY_ID
-│   └── endpoints.ts        # 384 deduped API endpoint paths
-│
-├── schemas/                # zod output schemas, one file per tool group
-│   ├── primitives.ts       # Shared: HrZoneDurations, RecoveryState, withPreview, etc.
-│   ├── today.ts            # whoop_today + whoop_day
-│   ├── profile.ts
-│   ├── calendar.ts
-│   ├── recovery.ts
-│   ├── sleep.ts
-│   ├── strain.ts
-│   ├── trend.ts
-│   ├── compare.ts
-│   ├── stress.ts
-│   ├── sleep_need.ts
-│   ├── live.ts             # live_hr, live_state, live_stress
-│   ├── workouts.ts         # workout/workouts/activity_create/activity_delete
-│   ├── strength.ts         # all 9 strength tools
-│   ├── journal.ts          # all 5 journal tools
-│   ├── womens_health.ts    # cycle, cycle_log, symptom_log
-│   ├── coach.ts            # coach_ask
-│   ├── performance.ts
-│   ├── smart_alarm.ts      # smart_alarm + smart_alarm_set
-│   ├── leaderboard.ts
-│   ├── settings.ts         # hr_zones, hr_zones_set, profile_update, hidden_metric
-│   └── escape.ts           # raw + endpoints
-│
-├── projections/            # Raw API response → flat domain object
-│   ├── today.ts            # Composes home + sleep + state
-│   ├── profile.ts          # bootstrap + hidden-metrics + stealth
-│   ├── calendar.ts
-│   ├── recovery.ts         # Walks SCORE_GAUGE + CONTRIBUTORS_TILE (new May-2026 shape)
-│   ├── sleep.ts            # Walks DETAILS_GRAPHING_CARDs + BAR_GRAPH_CARD stages
-│   ├── strain.ts           # Same pattern as recovery
-│   ├── trend.ts            # Handles dual segment shape (array vs named keys)
-│   ├── stress.ts           # stress_state.timeline extraction
-│   ├── sleep_need.ts       # Parses "8h 23m" formatted strings
-│   ├── live_hr.ts          # health-tab-bff section walk
-│   ├── live_state.ts       # user-state passthrough with state enum coercion
-│   ├── live_stress.ts      # Reuses projectStress
-│   ├── workouts.ts         # /developer/v2 list flattening
-│   ├── workout.ts          # cardio-details walk (HR zones, MSK, etc.)
-│   ├── lift_prs.ts         # extractPrTiles wrapper
-│   ├── lift_exercise.ts    # 3-input composite
-│   ├── lift_progression.ts # metrics-as-array fix
-│   ├── lift_history.ts     # Filtered workouts + per-id cardio-details
-│   ├── lift_library.ts     # Discriminated union list/single
-│   ├── journal.ts          # v3 drafts → BEHAVIORS_BY_ID lookup
-│   ├── behavior_impact.ts  # METRIC_CARD walk
-│   ├── cycle.ts            # CYCLE_PHASE_TILE walk
-│   ├── performance_assessment.ts
-│   ├── smart_alarm.ts      # alarm_schedule_list + alarm_bounds composition
-│   ├── leaderboard.ts      # board + your row composition
-│   └── hr_zones.ts         # zones + settings composition
-│
-├── tools/
-│   ├── register.ts         # Wires all 47 tools to McpServer
-│   └── v2/                 # 47 tool files (26–116 lines each; median ~50)
-│       ├── today.ts
-│       ├── day.ts
-│       ├── profile.ts
-│       ├── calendar.ts
-│       ├── recovery.ts
-│       ├── sleep.ts
-│       ├── strain.ts
-│       ├── trend.ts
-│       ├── compare.ts
-│       ├── stress.ts
-│       ├── sleep_need.ts
-│       ├── live_hr.ts
-│       ├── live_state.ts
-│       ├── live_stress.ts
-│       ├── workouts.ts
-│       ├── workout.ts
-│       ├── activity_create.ts
-│       ├── activity_delete.ts
-│       ├── sports_catalog.ts
-│       ├── lift_prs.ts
-│       ├── lift_exercise.ts
-│       ├── lift_progression.ts
-│       ├── lift_history.ts
-│       ├── lift_library.ts
-│       ├── lift_catalog.ts
-│       ├── lift_log.ts
-│       ├── lift_template_save.ts
-│       ├── lift_custom_exercise.ts
-│       ├── journal.ts
-│       ├── journal_catalog.ts
-│       ├── behavior_impact.ts
-│       ├── journal_log.ts
-│       ├── journal_autopop.ts
-│       ├── cycle.ts
-│       ├── cycle_log.ts
-│       ├── symptom_log.ts
-│       ├── coach_ask.ts
-│       ├── performance_assessment.ts
-│       ├── smart_alarm.ts
-│       ├── smart_alarm_set.ts
-│       ├── leaderboard.ts
-│       ├── hr_zones.ts
-│       ├── hr_zones_set.ts
-│       ├── profile_update.ts
-│       ├── hidden_metric.ts
-│       ├── raw.ts
-│       └── endpoints.ts
-│
-├── lib/                    # Shared utilities
-│   ├── walk.ts             # Tree walkers, type coercers, extract*Sessions, findCardByTitle
-│   ├── dates.ts            # todayIso, parsePgRange, rangeFromDays
-│   ├── format.ts           # kgToLb, metersToFeet, kjToCal, msToMinutes
-│   └── stats.ts            # mean, slopePerDay, deltaVsWindow
-│
-└── scripts/
-    ├── cognito_bootstrap.ts        # One-time login: writes tokens to .env
-    └── (catalog-regenerators, live-API test runners, and probe scripts all live in the separate whoop-testing archive — they need raw captures that contain personal data)
-```
-
-That's **114 source files** (115 with the one shipped script) totaling ~14,100 lines of TypeScript. ~8,300 lines are auto-generated bundled-catalog code (`src/data/{behaviors,exercises,sports,endpoints}.ts`). The remaining ~5,800 lines are real code: ~4,960 across projections + tools + whoop + lib (the actual logic), plus ~840 in zod schemas.
 
 ---
 
@@ -609,7 +244,7 @@ Recovery score + HRV (with baseline) + RHR (with baseline) + respiratory rate + 
 
 - **Input:** `{date?: string}`
 - **Source:** `GET /home-service/v1/deep-dive/recovery?date=`
-- **Output:** See [Architecture → Schema](#three-layer-per-tool-architecture) above for the full schema.
+- **Output:** `{date, score, state, hrv:{ms,baseline_ms,delta_pct}, rhr:{bpm,baseline_bpm,delta_pct}, respiratory_rate, spo2_pct, skin_temp_c, sleep_performance_pct, contributors:[{name,direction,detail}], calibration_state}`. Full schema in `src/schemas/recovery.ts`.
 - **Walk shape (new):** `SCORE_GAUGE { id: "RECOVERY_SCORE_GAUGE" }.content.score_display` for the score, `CONTRIBUTORS_TILE { id: "RECOVERY_CONTRIBUTORS_TILE" }.content.metrics[]` for each contributor. Each metric carries `status` (today's value) and `status_subtitle` (baseline — API-provided, not computed). Whoop migrated from `GRAPHING_CARD` tiles to this shape in May 2026; the projection was rewritten on 2026-05-26.
 - **Baseline:** unlike the old projection (which computed a 6-day rolling mean), baselines now come straight from the API in `status_subtitle`. Same field on the wire, no client-side math.
 - **SpO2 / skin_temp:** populated only on 4.0+ straps. The new contributors tile includes `CONTRIBUTORS_TILE_SPO2` and `CONTRIBUTORS_TILE_SKIN_TEMPERATURE` when present.
@@ -642,7 +277,7 @@ Trend data for any of 25 metrics across up to four windows (week / month / six_m
 - **Source:** `GET /progression-service/v3/trends/{metric}?endDate=`
 - **Output:** `{metric, end_date, segments: [{label: "week"|"month"|"six_month"|"year", start_date, end_date, avg, min, max, delta_pct, unit, points: [{date, value, value_display}]}], cardio_fitness_level}`
 
-Heads up: this is one of the larger tools by output size because it returns per-day data points across multiple windows. Output size varies by metric — see the [token usage analysis](#token-usage-analysis) for measured values. Use `whoop_compare` if you only need aggregate numbers.
+Heads up: this is one of the larger tools by output size because it returns per-day data points across multiple windows. Use `whoop_compare` if you only need aggregate numbers.
 
 #### `whoop_compare`
 Side-by-side comparison of two date windows across recovery / sleep performance / day strain / HRV / RHR.
@@ -983,145 +618,28 @@ Search the bundled catalog of 384 deduped endpoint paths.
 
 ## Authentication
 
-The MCP wraps Whoop's Cognito auth flow with automatic refresh, single-flight concurrency control, and `.env` persistence. You bootstrap once with email + password (+ MFA code if your account has SMS MFA enabled). After that, refresh tokens auto-renew for ~30 days and access tokens auto-refresh every 24 hours in the background.
+Whoop's iOS app uses **AWS Cognito** routed through a Whoop-owned proxy (`/auth-service/v3/whoop/`). The proxy fills in `ClientId` + `SECRET_HASH` server-side — no IPA extraction needed.
 
-### The auth model
+**Bootstrap once** (email + password + SMS MFA code if your account has it on) → tokens written to `.env`. **After that, it's hands-off**: access tokens auto-refresh every 24h via the refresh token; refresh token lives ~30 days. Single-flight refresh gate prevents thundering-herd refreshes when concurrent tool calls all see a stale token at the same time.
 
-Whoop's iOS app uses **AWS Cognito** but routes all Cognito calls through a Whoop-owned proxy at `api.prod.whoop.com/auth-service/v3/whoop/`. The proxy fills in the `ClientId` + `SECRET_HASH` server-side, so we don't need to extract these from the IPA. The wire format is the standard `application/x-amz-json-1.1` Cognito envelope.
+**Error classes** (`src/whoop/errors.ts`):
 
-```
-src/whoop/cognito.ts: 150 lines
-├── bootstrapCognito({email, password, mfaPrompt})
-│   → USER_PASSWORD_AUTH InitiateAuth
-│   → If SMS_MFA / SOFTWARE_TOKEN_MFA challenge, prompt + RespondToAuthChallenge
-│   → Returns {accessToken, refreshToken, idToken, expiresAt}
-│
-└── refreshCognitoSession(email, refreshToken)
-    → REFRESH_TOKEN_AUTH InitiateAuth
-    → Returns new tokens (refresh token may or may not rotate)
-```
+| Error | When | Behavior |
+|---|---|---|
+| `WhoopAuthExpiredError` | 401 from Whoop | TokenManager refreshes on next call |
+| `WhoopApiError` | 4xx with body | Description surfaced to caller |
+| `WhoopServerError` | 5xx | Transient — retry |
+| `WhoopProjectionError` | Projection output failed zod parse | Whoop changed shape — fix the projection |
 
-### Token management
-
-```
-src/whoop/token_manager.ts: 83 lines
-├── constructor(config)
-│   - Reads access token, decodes JWT exp claim
-│   - Computes expiresAt = exp * 1000
-│
-├── async getToken(): Promise<string>
-│   - If Date.now() < expiresAt - 60s → return cached token
-│   - Else: refresh (single-flight)
-│   - Returns: current valid access token
-│
-└── doRefresh(): single-flight async
-    - Calls refreshCognitoSession()
-    - Updates cached tokens + expiresAt
-    - Persists new tokens to .env (overwrite-in-place)
-```
-
-The single-flight gate prevents thundering-herd refreshes when many tool calls race past the staleness check simultaneously:
-
-```ts
-async getToken(): Promise<string> {
-  if (this.isFresh()) return this.accessToken;
-  if (!this.refreshing) {
-    this.refreshing = this.doRefresh().finally(() => {
-      this.refreshing = null;
-    });
-  }
-  await this.refreshing;
-  return this.accessToken;
-}
-```
-
-### HTTP client
-
-```
-src/whoop/client.ts: 112 lines
-└── class WhoopClient
-    ├── get<T>(path, query?)
-    ├── post<T>(path, body, query?)
-    ├── put<T>(path, body, query?)
-    └── delete<T>(path, query?)
-        all delegate to:
-    └── private request<T>(method, path, query, body)
-        - Awaits getToken() for fresh bearer
-        - Sets authorization: bearer <token>
-        - Appends apiVersion=7
-        - AbortController with 30s timeout
-        - Classifies response:
-            - 204 → undefined (writes)
-            - 401 → throw WhoopAuthExpiredError
-            - 5xx → throw WhoopServerError
-            - other 4xx → throw WhoopApiError with parsed description
-            - 2xx → return parsed JSON
-```
-
-### Error model
-
-```
-src/whoop/errors.ts
-├── WhoopAuthExpiredError  - JWT expired, refresh triggered
-├── WhoopApiError          - 4xx with description
-├── WhoopServerError       - 5xx (transient)
-├── WhoopSchemaError       - response shape change detected
-└── WhoopProjectionError   - projection emitted data that failed zod parse
-```
-
-The last one is particularly useful — when Whoop changes a response shape, your tools don't silently return junk. The schema parse fails and you get a clear `"Projection for whoop_recovery failed zod parse: ..."` error.
+When refresh-token lifetime expires (~30 days), re-run `npm run cognito-bootstrap` (local) or `npm run rebootstrap` (deployed). Brand-new SMS code, fresh 30-day window.
 
 ---
 
 ## Write-safety harness
 
-Every write tool defaults `confirm: false`. The first call returns a **preview** of what would execute. Claude must explicitly re-call with `confirm: true` to fire the actual request.
+Every write tool defaults `confirm: false`. The first call returns a **preview** of what would execute. Claude must explicitly re-call with `confirm: true` to fire the actual request. Without the gate, a hallucinated "log my workout" could create garbage activities on your account.
 
-### How it works
-
-```ts
-// src/whoop/write_safety.ts
-export const WritePreviewSchema = z.object({
-  preview: z.literal(true),
-  will_execute: z.object({
-    method: z.string(),
-    path: z.string(),
-    body_summary: z.unknown(),
-  }),
-  set_confirm_true_to_run: z.literal(true),
-});
-
-export function preview(method: string, path: string, bodySummary: unknown): WritePreview {
-  return {
-    preview: true,
-    will_execute: { method, path, body_summary: bodySummary },
-    set_confirm_true_to_run: true,
-  };
-}
-
-export function withPreview<T extends z.ZodTypeAny>(receipt: T) {
-  return z.union([WritePreviewSchema, receipt]);
-}
-```
-
-Every write tool's output schema is `withPreview(SuccessReceiptSchema)`, which is a discriminated union of either preview or receipt.
-
-Inside a write tool handler:
-
-```ts
-async ({ confirm, ...args }) => {
-  const body = buildBody(args);
-  if (!confirm) {
-    return { content: [{ type: "text", text: jsonOut(preview("POST", PATH, summarize(args))) }] };
-  }
-  const receipt = await client.post(PATH, body);
-  return { content: [{ type: "text", text: jsonOut(ReceiptSchema.parse(receipt)) }] };
-}
-```
-
-### What Claude sees
-
-When Claude calls `whoop_lift_log` with workout details (no `confirm`):
+The preview shape (lives in `src/whoop/write_safety.ts`):
 
 ```json
 {
@@ -1130,178 +648,47 @@ When Claude calls `whoop_lift_log` with workout details (no `confirm`):
     "method": "POST",
     "path": "/weightlifting-service/v2/weightlifting-workout/activity",
     "body_summary": {
-      "exercise_count": 3,
-      "set_count": 12,
-      "exercise_list": [
-        {"name": "BENCHPRESS_BARBELL", "set_count": 5},
-        {"name": "OVERHEADPRESS_BARBELL", "set_count": 3},
-        {"name": "OVERHANDGRIPPULLUPS", "set_count": 4}
-      ]
+      "exercise_count": 3, "set_count": 12,
+      "exercise_list": [{"name": "BENCHPRESS_BARBELL", "set_count": 5}, ...]
     }
   },
   "set_confirm_true_to_run": true
 }
 ```
 
-Claude reads this back to you, you confirm, Claude re-calls with `confirm: true`, and the actual POST fires:
-
-```json
-{
-  "logged": true,
-  "activity_id": "6bbc2d36-dad7-408b-aa6e-90fe993c3bc7",
-  "exercise_count": 3,
-  "set_count": 12,
-  "total_volume_kg": null
-}
-```
-
-### Why it matters
-
-LLMs occasionally hallucinate or misinterpret. Without the preview gate, "log my workout" could fire a malformed write that creates garbage activities on your Whoop account. With the gate, every write requires Claude to re-confirm — which means it has to "intend to write" twice, with the preview JSON visible in chat both times. You get to read what's about to happen before it happens.
+Claude reads this back to you, you confirm, Claude re-calls with `confirm: true`, the actual POST fires. Every write tool's output schema is a `withPreview(ReceiptSchema)` discriminated union — preview or receipt, never both.
 
 ---
 
 ## Bundled catalogs
 
-Four datasets are compiled into the MCP at build time, not fetched at runtime:
+Four datasets compiled into the MCP at build time (not fetched at runtime):
 
-| Catalog | Entries | Use | Catalog tool |
+| Catalog | Entries | Catalog tool | Use |
 |---|---:|---|---|
-| `src/data/behaviors.ts` | 308 | Journal behavior lookup; validation in `whoop_journal_log` + `whoop_symptom_log` | `whoop_journal_catalog` |
-| `src/data/exercises.ts` | 372 | Exercise lookup; denormalization in `whoop_lift_log` body builder | `whoop_lift_catalog` |
-| `src/data/sports.ts` | 203 | Numeric `sport_id` ↔ name lookup for `whoop_activity_create` | `whoop_sports_catalog` |
-| `src/data/endpoints.ts` | 384 | Path search | `whoop_endpoints` |
+| `behaviors.ts` | 308 | `whoop_journal_catalog` | Journal behavior validation |
+| `exercises.ts` | 372 | `whoop_lift_catalog` | Strength Trainer exercises |
+| `sports.ts` | 203 | `whoop_sports_catalog` | `sport_id` ↔ name |
+| `endpoints.ts` | 384 | `whoop_endpoints` | API path search |
 
-### Session-scoped catalog gate
-
-To keep tool descriptions small (saves ~14k system-prompt tokens per session), the three large catalogs (sports, exercises, behaviors) are **gated** by their corresponding catalog tools. Tools that take IDs from these catalogs refuse to run until the lookup tool has been called at least once in the session. The gate state lives in `src/whoop/session_state.ts`.
-
-| Catalog | Unlock tool | Gated tools |
-|---|---|---|
-| sports | `whoop_sports_catalog` | `whoop_activity_create` |
-| exercises | `whoop_lift_catalog` | `whoop_lift_log`, `whoop_lift_exercise`, `whoop_lift_progression`, `whoop_lift_template_save`, `whoop_lift_custom_exercise` |
-| behaviors | `whoop_journal_catalog` | `whoop_journal_log`, `whoop_symptom_log` (only when `symptoms[]` is non-empty) |
-
-Without the gate, an AI calling e.g. `whoop_activity_create` first gets a structured error `{error: "Must call whoop_sports_catalog first…", hint: "…"}` — even if the `sport_id` it guessed is real.
-
-### Why bundled?
-
-The MCP runs locally on your machine and has filesystem access. We could read these as JSON files at runtime. But:
-
-1. **Speed.** No file I/O. The maps `BEHAVIORS_BY_ID` and `EXERCISES_BY_ID` are initialized once at module load.
-2. **Type safety.** Each entry is typed against its zod schema at compile time. If the catalog has a malformed entry, `tsc` fails.
-3. **Distribution.** A single `dist/server.js` includes everything. No external files to ship.
-
-### Regenerating
-
-When Whoop adds new behaviors / exercises / sports / endpoints, the bundled `src/data/*.ts` files need to be regenerated. The raw inputs and the build script are NOT shipped with this package — they live in the separate `whoop-testing` archive because the raw captures contain personal data (real account IDs, real biometric values, etc.).
-
-To regenerate: ask the maintainer, or capture your own raw responses against the relevant endpoints via `whoop_raw` and hand-edit the corresponding `src/data/*.ts` file. The bundled files are auto-generated but plain TypeScript — they're readable and you can append entries directly if Whoop adds something new.
+**Session-scoped gate**: tools that take IDs from sports/exercises/behaviors refuse to run until the corresponding catalog tool has been called once per session. Keeps ~14k tokens out of the system prompt. AI calling e.g. `whoop_activity_create` first gets `{error: "Must call whoop_sports_catalog first…"}`.
 
 ---
 
-## Setup
+## Configuration
 
-### Prerequisites
+### Environment variables
 
-- **macOS, Linux, or Windows.** All tested on macOS 14 (Apple Silicon). Linux works. Windows works via WSL or PowerShell.
-- **Node.js 24+.** The MCP uses modern ESM, `fetch`, `AbortController`, and other Node 20+ features. Older Node won't work.
-- **A Whoop account** with login credentials. SMS MFA is supported.
-- **An MCP-compatible client.** Claude Desktop, Claude Code, or any other client that speaks MCP over stdio.
+| Variable | Required | Description |
+|---|---|---|
+| `WHOOP_EMAIL` | yes | Your Whoop login email |
+| `WHOOP_PASSWORD` | yes (bootstrap only) | Your Whoop login password (used only during bootstrap) |
+| `WHOOP_IOS_BEARER_TOKEN` | yes | Cognito access token (24h, auto-refreshed) |
+| `WHOOP_COGNITO_REFRESH_TOKEN` | yes | Cognito refresh token (~30d) |
+| `WHOOP_USER_ID` | no | Your Whoop user ID — used by `whoop_profile`, `whoop_leaderboard`. Avoids one bootstrap call per session. |
+| `WHOOP_TIMEZONE` | no | IANA timezone (e.g., `America/Los_Angeles`). If unset, auto-detected from your Whoop profile and refreshed hourly. Set explicitly to override. |
 
-### Step 1: Install
-
-```bash
-git clone <repo> whoop-mcp
-cd whoop-mcp
-npm install
-```
-
-This installs:
-- `@modelcontextprotocol/sdk` (the MCP server SDK)
-- `zod` (schema validation)
-- `dotenv` (env loading)
-- `typescript`, `tsx`, `vitest` as devDeps
-
-No network requests during install other than npm registry fetches.
-
-### Step 2: Create `.env`
-
-Create a file named `.env` at the repo root:
-
-```bash
-WHOOP_EMAIL=your@email.com
-WHOOP_PASSWORD=your-whoop-password
-WHOOP_USER_ID=
-WHOOP_IOS_BEARER_TOKEN=
-WHOOP_COGNITO_REFRESH_TOKEN=
-```
-
-The last three are filled in automatically after bootstrap.
-
-**Security note:** Your password is stored locally in `.env`. It's used once during bootstrap and never again. If you'd rather not store it long-term, delete the `WHOOP_PASSWORD` line after the initial bootstrap — auto-refresh works off the refresh token, not the password.
-
-### Step 3: Bootstrap
-
-```bash
-npm run cognito-bootstrap
-```
-
-What this does:
-1. Loads `WHOOP_EMAIL` + `WHOOP_PASSWORD` from `.env`
-2. Calls `POST /auth-service/v3/whoop/` with `AuthFlow: USER_PASSWORD_AUTH`
-3. If the response is an `SMS_MFA` challenge, prompts you for the 6-digit code Whoop just texted you
-4. Calls `RespondToAuthChallenge` with the code
-5. Receives the access token (24h), refresh token (~30d), and ID token
-6. Writes `WHOOP_IOS_BEARER_TOKEN` + `WHOOP_COGNITO_REFRESH_TOKEN` back to `.env`
-7. Verifies refresh works by immediately calling `REFRESH_TOKEN_AUTH`
-8. Writes the (possibly rotated) refreshed tokens back
-
-You should see:
-
-```
-Authenticating with AWS Cognito (us-west-2_rYv1jhSC3)...
-Enter the SMS MFA code Whoop just texted you: 123456
-
-Initial auth OK. Access token expires in ~24h. Refresh token saved.
-
-Verifying that auto-refresh works (no MFA expected)...
-  Auto-refresh works. New access token expires in ~24h.
-
-Setup complete. The MCP will auto-refresh access tokens going forward.
-Re-bootstrap only when the refresh token expires (~30 days).
-```
-
-If your account has TOTP authenticator MFA instead of SMS, you'll be prompted with a slightly different message but the flow is the same.
-
-### Step 4: Build
-
-```bash
-npm run build
-```
-
-This runs `tsc` and outputs to `dist/`. You should see no errors.
-
-```bash
-ls dist/
-# data/  lib/  projections/  schemas/  scripts/  server.js  server.js.map  tools/  whoop/
-```
-
-### Step 5: Verify locally
-
-Run the server in dev mode:
-
-```bash
-npm run dev
-```
-
-This starts the MCP server on stdio. You won't see much output — MCP servers are designed to be invoked by clients, not run interactively. Hit Ctrl+C to stop.
-
-If you want to confirm tools registered correctly, look at the verbose output during the first call from your client.
-
-### Step 6: Wire into Claude Desktop
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or the equivalent on your OS:
+### Claude Desktop config
 
 ```json
 {
@@ -1314,320 +701,88 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-> **Critical:** Use the absolute path to `node` (find it via `which node`). Claude Desktop does NOT inherit your shell's `PATH`, so `"node"` alone won't be found.
-
-Restart Claude Desktop. You should see "whoop" listed as an available MCP server in the chat input. All 47 tools should be available.
-
-### Step 6b (alternative): Wire into Claude Code
-
-```bash
-claude mcp add whoop /opt/homebrew/bin/node /absolute/path/to/whoop-mcp/dist/server.js
-```
-
-Or edit your Claude Code MCP config directly:
-
-```bash
-~/.claude/mcp.json
-```
-
-### Step 6c (alternative): Use `tsx` for live dev
-
-If you're actively developing the MCP, point your client at `tsx` so you don't have to rebuild:
-
-```json
-{
-  "mcpServers": {
-    "whoop": {
-      "command": "/opt/homebrew/bin/npx",
-      "args": ["tsx", "/absolute/path/to/whoop-mcp/src/server.ts"]
-    }
-  }
-}
-```
-
-### Step 7: Test
-
-In your Claude client, ask:
-
-> "How am I doing today on Whoop?"
-
-You should get a structured response from `whoop_today` containing your recovery score, sleep performance, and day strain.
-
-If it doesn't work, see [Troubleshooting](#troubleshooting).
-
----
-
-## Configuration
-
-### Environment variables
-
-Required:
-
-| Variable | Description |
-|---|---|
-| `WHOOP_EMAIL` | Your Whoop login email |
-| `WHOOP_PASSWORD` | Your Whoop login password (only used during bootstrap) |
-| `WHOOP_IOS_BEARER_TOKEN` | Cognito access token (24h lifetime, auto-refreshed) |
-| `WHOOP_COGNITO_REFRESH_TOKEN` | Cognito refresh token (~30d lifetime) |
-
-Optional:
-
-| Variable | Description |
-|---|---|
-| `WHOOP_USER_ID` | Your Whoop user ID (used by `whoop_profile`, `whoop_leaderboard`) |
-| `WHOOP_TIMEZONE` | IANA timezone (e.g., `America/Los_Angeles`). Whoop's API returns timestamps in UTC; the MCP rewrites them with an explicit offset so the AI sees clock-correct local times. **Optional** — if unset, the server auto-detects from your Whoop profile's `timezone_offset` (refreshed hourly), which works for travelers without restarts. Only set this explicitly if you want to override (e.g., force a fixed business TZ regardless of where your phone is). |
-
-The MCP also respects standard env vars like `NODE_ENV` and `HTTP_PROXY` (for routing through a proxy during development).
-
-### Claude Desktop config
-
-The minimal MCP config:
-
-```json
-{
-  "mcpServers": {
-    "whoop": {
-      "command": "/opt/homebrew/bin/node",
-      "args": ["/path/to/whoop-mcp/dist/server.js"]
-    }
-  }
-}
-```
-
-With explicit env (overrides .env):
-
-```json
-{
-  "mcpServers": {
-    "whoop": {
-      "command": "/opt/homebrew/bin/node",
-      "args": ["/path/to/whoop-mcp/dist/server.js"],
-      "env": {
-        "WHOOP_EMAIL": "you@example.com",
-        "WHOOP_USER_ID": "200001"
-      }
-    }
-  }
-}
-```
-
-The MCP loads `.env` from the repo root (relative to `server.js`), so if you move the built `dist/` somewhere else, also move `.env` to its parent.
-
-### TypeScript config
-
-`tsconfig.json`:
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2024",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "outDir": "dist",
-    "rootDir": "src",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noImplicitOverride": true,
-    "exactOptionalPropertyTypes": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "declaration": false,
-    "sourceMap": true,
-    "types": ["node"]
-  }
-}
-```
-
-Strict mode is on. `exactOptionalPropertyTypes` is the strictest setting — TypeScript will reject `{x?: number}` types that allow `{x: undefined}`, requiring you to use `{x?: number | undefined}` explicitly when needed.
-
-`noUncheckedIndexedAccess` means `arr[0]` is typed as `T | undefined`, not `T`. This catches off-by-one bugs in array access.
+The MCP loads `.env` from the repo root (relative to `server.js`). Use absolute paths — Claude Desktop doesn't inherit shell `PATH`.
 
 ---
 
 ## Remote hosting
 
-By default this MCP runs as a local stdio process that your AI client spawns as a subprocess. That's fine for one machine, but if you want to:
+The MCP also speaks HTTP, so you can deploy it to a server and use it from multiple devices instead of running stdio locally. Same 47 tools, same auto-refresh, just behind a bearer-token gate at a URL.
 
-- Use the same Whoop MCP from multiple devices (laptop, desktop, phone via a mobile MCP client)
-- Run it on an always-on server so it's available without your computer being on
-- Share it with a remote Claude (claude.ai web, ChatGPT once their MCP support lands)
-
-…you can also run it over HTTP. The exact same 47 tools, same Cognito auto-refresh, same write-safety harness — just exposed at a URL behind a bearer-token gate instead of stdio.
-
-### How it works
-
-```
-Your AI client (Claude Desktop, Claude Code, ChatGPT, etc.)
-    │
-    │  HTTPS + Authorization: Bearer <your-token>
-    ▼
-┌──────────────────────────────────┐
-│  whoop-mcp HTTP server           │
-│  - StreamableHTTP transport      │
-│  - bearer-token auth gate        │
-│  - same 47 MCP tools             │
-│  - same Cognito auto-refresh     │
-└──────────────────────────────────┘
-    │
-    │  authenticated as YOUR Whoop account
-    ▼
-api.prod.whoop.com
-```
-
-**Single-user, single-account.** A deployment is tied to one Whoop account (the one whose Cognito tokens you set in env). If two people each want remote MCP access, each runs their own deployment.
-
-### One-time setup on your local Mac
-
-You still need to do the Cognito bootstrap locally because it requires an interactive MFA prompt (if your Whoop account has SMS MFA on). After that, you copy the resulting tokens to your server.
+### Setup
 
 ```bash
+# Local bootstrap (one-time — Cognito needs an interactive MFA prompt)
 git clone https://github.com/briangaoo/whoop-mcp.git
 cd whoop-mcp
 npm install
-cp .env.example .env
-# edit .env: WHOOP_EMAIL + WHOOP_PASSWORD
+cp .env.example .env  # fill in WHOOP_EMAIL + WHOOP_PASSWORD
 npm run cognito-bootstrap
-# This populates WHOOP_IOS_BEARER_TOKEN + WHOOP_COGNITO_REFRESH_TOKEN in .env
 
-# Generate a random bearer token your AI client will send on every request:
+# Generate a bearer token your AI client will present on every request
 openssl rand -hex 32
-# → save the output somewhere safe (you'll need it both server-side and client-side)
 ```
 
-### Deploy with Docker (anywhere)
+### Deploy with Docker
 
-The repo ships a `Dockerfile` that builds a single Alpine-based image. Deploy it to any container host:
+The repo ships a `Dockerfile`. Build + deploy anywhere:
 
 ```bash
-# Local test first
 docker build -t whoop-mcp .
-docker run --rm -p 3000:3000 \
-  -e WHOOP_EMAIL=your@email.com \
-  -e WHOOP_IOS_BEARER_TOKEN="$(grep WHOOP_IOS_BEARER_TOKEN .env | cut -d= -f2-)" \
-  -e WHOOP_COGNITO_REFRESH_TOKEN="$(grep WHOOP_COGNITO_REFRESH_TOKEN .env | cut -d= -f2-)" \
-  -e MCP_AUTH_TOKEN="$(openssl rand -hex 32)" \
-  whoop-mcp
+docker run -d -p 3000:3000 \
+  -e WHOOP_EMAIL=... -e WHOOP_IOS_BEARER_TOKEN=... -e WHOOP_COGNITO_REFRESH_TOKEN=... \
+  -e MCP_AUTH_TOKEN=... whoop-mcp
 
-# You should see: [whoop-mcp] listening on http://0.0.0.0:3000/mcp
-# Hit GET /health (no auth) to confirm it's alive:
-curl http://localhost:3000/health
-# → {"status":"ok"}
+curl http://localhost:3000/health  # → {"status":"ok"}
 ```
 
-From here, deploy to any Docker host you like:
+Recommended hosts: **Fly.io** (free tier, easy CLI), **Railway** ($5 trial, GitHub integration), **Render** (free tier with cold starts), any **VPS** with Caddy/Nginx for HTTPS.
 
-| Host | Why | Notes |
-|---|---|---|
-| **Fly.io** | free tier with always-on machines, easy CLI | `fly launch && fly secrets set WHOOP_EMAIL=... WHOOP_IOS_BEARER_TOKEN=... WHOOP_COGNITO_REFRESH_TOKEN=... MCP_AUTH_TOKEN=...` |
-| **Railway** | tightest GitHub integration, $5 trial | New project → deploy from GitHub → add the env vars in the Variables panel |
-| **Render** | free tier (with cold starts) | Free tier sleeps after 15 min idle — bad for SSE-style connections, fine for occasional MCP queries |
-| **A VPS** (Hetzner, DigitalOcean, etc.) | $4–6/mo, full control | `docker run -d --restart=always ...` and put it behind Caddy or Nginx with HTTPS |
-| **Cloudflare Tunnel from your Mac** | zero deployment cost, easiest debug path | `cloudflared tunnel --url http://localhost:3000` — only works when your Mac is awake |
+### Point your AI client at the URL
 
-### Point your AI client at the deployed URL
-
-The exact config depends on the client.
-
-**Claude Desktop** — edit `~/Library/Application Support/Claude/claude_desktop_config.json`. Claude Desktop does **not** natively support remote MCP servers; you have to bridge through stdio with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
+**Claude Desktop** doesn't natively speak remote MCP — bridge through stdio with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
 
 ```json
 {
   "mcpServers": {
     "whoop": {
       "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote",
-        "https://your-app.fly.dev/mcp",
-        "--header",
-        "Authorization:Bearer your-mcp-auth-token-here"
-      ]
+      "args": ["-y", "mcp-remote", "https://your-app.fly.dev/mcp",
+               "--header", "Authorization:Bearer your-mcp-auth-token"]
     }
   }
 }
 ```
 
-`mcp-remote` is a small Node bridge that connects to your remote HTTP MCP server and proxies it as stdio for Claude Desktop. First invocation downloads it via `npx` (~5s); subsequent runs are cached and instant.
-
-> If you paste a config with `{"url": "...", "headers": {...}}` directly into Claude Desktop, you'll see a dialog: *"The following entries in claude_desktop_config.json are not valid MCP server configurations and were skipped: whoop"* — that's Claude Desktop telling you it only accepts stdio. Use the `mcp-remote` form above.
-
-**Claude Code** — natively supports remote MCP servers (no bridge needed):
+**Claude Code** speaks remote MCP natively:
 
 ```bash
-claude mcp add whoop --url https://your-app.fly.dev/mcp --header "Authorization: Bearer your-mcp-auth-token-here"
+claude mcp add whoop --url https://your-app.fly.dev/mcp \
+  --header "Authorization: Bearer your-mcp-auth-token"
 ```
 
-Restart your client. The 47 tools should appear identically to the local stdio setup.
+### Env vars (HTTP mode)
 
-### Environment variables (HTTP mode)
+| Var | Required | Notes |
+|---|---|---|
+| `MCP_TRANSPORT=http` | yes | enables the HTTP server |
+| `MCP_AUTH_TOKEN` | yes | ≥16 char random string; bearer for every request |
+| `PORT` (or `MCP_HTTP_PORT`) | no | default `3000` |
+| `WHOOP_TOKEN_STORE` | no | `envfile` (default, persists refreshed tokens) or `memory` (read-only FS hosts) |
 
-| Var | Required | Default | Notes |
-|---|---|---|---|
-| `MCP_TRANSPORT` | yes | `stdio` | Set to `http` to enable the HTTP server |
-| `MCP_AUTH_TOKEN` | yes (HTTP) | — | ≥16 char random string clients must present in the `Authorization: Bearer …` header |
-| `PORT` (or `MCP_HTTP_PORT`) | no | `3000` | The HTTP port to listen on |
-| `WHOOP_EMAIL` | yes | — | Same as local |
-| `WHOOP_IOS_BEARER_TOKEN` | yes | — | From `npm run cognito-bootstrap` |
-| `WHOOP_COGNITO_REFRESH_TOKEN` | yes | — | From `npm run cognito-bootstrap` |
-| `WHOOP_TOKEN_STORE` | no | `envfile` | `envfile` writes refreshed tokens back to `.env` (works on hosts with a persistent volume mounted at `/app`); `memory` skips persistence (use on Cloudflare Workers / read-only filesystems — accept that you re-bootstrap every ~30 days when the refresh token expires) |
+Plus the standard `WHOOP_EMAIL` / `WHOOP_IOS_BEARER_TOKEN` / `WHOOP_COGNITO_REFRESH_TOKEN`.
 
-The Dockerfile sets `MCP_TRANSPORT=http` and `WHOOP_TOKEN_STORE=memory` by default. Override if your host gives you a writable volume.
-
-### Health check
-
-```
-GET /health  →  200 OK {"status":"ok"}
-```
-
-No auth required. Use this for container health probes (Fly, Kubernetes, Docker `HEALTHCHECK`).
-
-### Security model
-
-The bearer token is the only thing standing between a stranger with your URL and full read+write access to your Whoop account. Treat it like a password:
-
-- **Generate randomly.** `openssl rand -hex 32` produces a 64-char hex string with 256 bits of entropy. Don't pick a memorable one.
-- **Never commit it.** It belongs in your host's secrets, not in source.
-- **Rotate if leaked.** Generate a new one, update on both server and client, redeploy.
-- **HTTPS only in production.** Plain HTTP exposes the bearer token to anyone sniffing the network. Every recommended host above gives you free HTTPS automatically.
-- **The token never expires** on its own — there's no rotation policy built in. If you want one, set up a cron job to redeploy with a new `MCP_AUTH_TOKEN` every N days.
-
-The token is compared in constant time (`crypto.timingSafeEqual`) to dodge timing attacks. Failed auth returns 401 without revealing whether the token was missing vs wrong.
-
-### Re-bootstrap when Cognito expires (~every 30 days)
-
-Whoop's refresh token has a ~30-day lifetime. When it expires, every tool call against the deployed MCP starts returning 5xx until you do a fresh `USER_PASSWORD_AUTH` login — which triggers an SMS code that needs interactive entry. There's no terminal on the deployed host, so the recovery flow is:
+### Re-bootstrapping when Cognito expires (~30 days)
 
 ```bash
-# Run from your Mac (anywhere with the repo checked out + .env):
-npm run rebootstrap
-# Or pass --app if your fly.toml isn't in the cwd:
-npx tsx src/scripts/rebootstrap.ts --app whoop-mcp-bg
+npm run rebootstrap  # SMS prompt → tokens pushed to Fly secrets in one command
 ```
 
-What this does:
-1. Calls `USER_PASSWORD_AUTH` against Cognito (Whoop texts your phone)
-2. Prompts you in the terminal for the SMS code
-3. Writes new `WHOOP_IOS_BEARER_TOKEN` + `WHOOP_COGNITO_REFRESH_TOKEN` to your local `.env`
-4. Pushes both to Fly via `fly secrets set -a <your-app>` so the deployed server picks them up automatically (Fly restarts the machine with the new secrets — takes ~10s)
+Requires being at your Mac. Auto-detects the Fly app from `fly.toml` or `$FLY_APP`. See [the `whoop-mcp` CLI](#the-whoop-mcp-cli) for `whoop-mcp rebootstrap`.
 
-You'll know you need to run this when:
-- Tool calls start failing with 500-class errors
-- `fly logs -a <your-app>` shows `WhoopAuthExpiredError` followed by a refresh that fails
-- Or proactively: ~25 days after your last bootstrap
+### Security
 
-**Caveat: requires you to be at your Mac.** If you're traveling when this happens, you're locked out until you can get back to a machine with the repo + `fly` CLI. If that's a dealbreaker, build the optional web-admin UI variant (a few hours of work to add a `/admin` route that takes the SMS code from a browser — see Roadmap).
-
-### When to use HTTP vs stdio
-
-| Use stdio when | Use HTTP when |
-|---|---|
-| You only use one machine | You roam between laptop + desktop + phone |
-| You're fine restarting your AI client to update the MCP | You want the MCP always running |
-| Local debugging — `npm run dev` reloads instantly | You want to share access between AI clients (Claude + ChatGPT etc.) |
-| Privacy: nothing leaves your machine except direct Whoop API calls | You're OK with your Whoop tokens living on a remote host |
-
-If you're not sure, start with stdio. Migrate to HTTP later — the codebase supports both, no fork needed.
+The bearer token is the only thing between a stranger with your URL and full read+write access to your Whoop. Treat it like a password — generate random (`openssl rand -hex 32`), HTTPS only, never commit, rotate if leaked. Constant-time compare on the server. Health endpoint (`/health`) is the only path that doesn't require auth.
 
 ---
 
@@ -1668,7 +823,7 @@ whoop-mcp --version       # Just the version string (parseable)
 | | `whoop-mcp test [filter]` | `vitest run` with optional filter. |
 | | `whoop-mcp typecheck` | `tsc --noEmit`. |
 | **Setup** | `whoop-mcp bootstrap` | First-time Cognito login, writes tokens to `.env` (SMS code prompt in your terminal). |
-| | `whoop-mcp rebootstrap [--app <fly-app>]` | Re-bootstrap + push fresh tokens to your Fly app's secrets. See [Re-bootstrap when Cognito expires](#re-bootstrap-when-cognito-expires-every-30-days). |
+| | `whoop-mcp rebootstrap [--app <fly-app>]` | Re-bootstrap + push fresh tokens to your Fly app's secrets. See [Remote hosting → Re-bootstrapping](#remote-hosting). |
 | **Deployed** | `whoop-mcp deploy` | `fly deploy` from the package root. |
 | | `whoop-mcp logs` | `fly logs --tail`, with `-a` auto-filled from `fly.toml` or `$FLY_APP`. |
 | | `whoop-mcp status` | `fly status` + a live GET on `/health`. |
@@ -1707,798 +862,11 @@ whoop-mcp config stdio > /tmp/whoop-config.json
 
 ---
 
-## Example conversations
-
-Here's what real conversations look like, with the tool calls Claude makes inline.
-
-### "How am I doing today?"
-
-```
-You: how am i doing today on whoop?
-
-Claude calls: whoop_today({})
-
-Returns: {
-  "date": "2026-05-25",
-  "recovery": {"score": 78, "state": "GREEN", "hrv_ms": 42, "rhr_bpm": 68},
-  "sleep": {
-    "performance_pct": 83,
-    "total_sleep_ms": 26640000,
-    "time_in_bed_ms": 28740000,
-    "efficiency_pct": 93,
-    "stages": {"rem_ms": 6600000, "light_ms": 15180000, "sws_ms": 4860000, "wake_ms": 2100000},
-    ...
-  },
-  "strain": {"score": 17.8, "calories": 1792, "avg_hr_bpm": 84, "max_hr_bpm": 171, "workouts_count": 1},
-  "current_state": {"state": "idle", "sport_name": null, "started_at": null}
-}
-
-Claude: Solid day. Your recovery is 78 (GREEN), HRV is 42ms which is at your baseline,
-and resting HR is 68 bpm. You slept 7h 24m last night (83% performance) with 93%
-efficiency. Strain is already at 17.8 from your one workout earlier — strong showing.
-You're currently idle.
-```
-
-### "Log my workout"
-
-```
-You: log my workout: bench 5x5 @ 225, ohp 3x8 @ 95, pull-ups 4x10
-
-Claude calls: whoop_lift_log({
-  exercises: [
-    {exercise_id: "BENCHPRESS_BARBELL", sets: [
-      {reps: 5, weight: 225}, {reps: 5, weight: 225}, {reps: 5, weight: 225},
-      {reps: 5, weight: 225}, {reps: 5, weight: 225}
-    ]},
-    {exercise_id: "OVERHEADPRESS_BARBELL", sets: [
-      {reps: 8, weight: 95}, {reps: 8, weight: 95}, {reps: 8, weight: 95}
-    ]},
-    {exercise_id: "OVERHANDGRIPPULLUPS", sets: [
-      {reps: 10}, {reps: 10}, {reps: 10}, {reps: 10}
-    ]}
-  ]
-})
-
-Returns: {
-  "preview": true,
-  "will_execute": {
-    "method": "POST",
-    "path": "/weightlifting-service/v2/weightlifting-workout/activity",
-    "body_summary": {
-      "exercise_count": 3,
-      "set_count": 12,
-      "exercise_list": [
-        {"name": "BENCHPRESS_BARBELL", "set_count": 5},
-        {"name": "OVERHEADPRESS_BARBELL", "set_count": 3},
-        {"name": "OVERHANDGRIPPULLUPS", "set_count": 4}
-      ]
-    }
-  },
-  "set_confirm_true_to_run": true
-}
-
-Claude: Ready to log:
-- Bench Press: 5 sets × 5 reps @ 225 lbs
-- Overhead Press: 3 sets × 8 reps @ 95 lbs
-- Pull-ups: 4 sets × 10 reps
-
-12 total sets across 3 exercises. Confirm?
-
-You: yes
-
-Claude calls: whoop_lift_log({...same args..., confirm: true})
-
-Returns: {
-  "logged": true,
-  "activity_id": "2c425b12-5abe-4c50-9e40-67449993c78e",
-  "exercise_count": 3,
-  "set_count": 12,
-  "total_volume_kg": null
-}
-
-Claude: Done. Workout logged with ID 2c425b12. Whoop will compute the strain score
-async in the next few minutes.
-```
-
-### "How's my HRV trending?"
-
-```
-You: how's my hrv trending vs last month?
-
-Claude calls: whoop_trend({metric: "HRV"})
-
-Returns: {
-  "metric": "HRV",
-  "end_date": "2026-05-25",
-  "segments": [
-    {
-      "label": "week",
-      "start_date": "May 19-25",
-      "end_date": "May 26",
-      "avg": 41,
-      "delta_pct": -2,
-      "unit": "ms",
-      "points": [...]
-    },
-    {
-      "label": "month",
-      "start_date": "Apr 26 - May 25",
-      "avg": 42,
-      "delta_pct": 8,
-      "unit": "ms",
-      "points": [...]
-    },
-    {
-      "label": "six_month",
-      "avg": 39,
-      "delta_pct": 13,
-      "unit": "ms",
-      "points": [...]
-    }
-  ]
-}
-
-Claude: Up trend. Your 30-day average HRV is 42ms (+8% vs prior month), and 6-month
-average is 39ms (+13% vs prior 6-month). This week is 41ms (-2% vs last week — basically
-flat). Long-term trajectory is positive.
-```
-
-### "What did Whoop Coach say about my recovery?"
-
-```
-You: ask whoop coach about my recovery
-
-Claude calls: whoop_coach_ask({message: "How's my recovery looking?"})
-
-Returns: {
-  "preview": true,
-  "will_execute": {
-    "method": "POST",
-    "path": "/ai-conversation-bff/v1/conversation + /turn",
-    "body_summary": {"message": "How's my recovery looking?", "context": "HOME"}
-  },
-  "set_confirm_true_to_run": true
-}
-
-Claude: I'll ask Whoop Coach. Confirm to send?
-
-You: yes
-
-Claude calls: whoop_coach_ask({message: "How's my recovery looking?", confirm: true})
-
-(30 second poll loop)
-
-Returns: {
-  "conversation_id": "5e0d4424-b31a-4a67-b06d-dfbf1030c0e9",
-  "turn_id": "596cb5fa-17b1-41e2-bf1e-6eed830462b7",
-  "response_text": "Hey Brian, your recovery is sitting at 78% today which is in your
-  green zone. HRV is right at baseline (42ms), and RHR is 68 — within 2 bpm of your
-  typical resting. Sleep efficiency was strong at 93% but you came in about 35 minutes
-  short of your needed hours. Push the lifts you had planned, but consider a slightly
-  earlier bedtime tonight to recover the deficit.",
-  "turn_status": "COMPLETE",
-  "polled_iterations": 8,
-  "timed_out": false
-}
-
-Claude: Whoop Coach says you're in the green zone (78% recovery). HRV is at baseline,
-RHR is 2 bpm above typical, sleep efficiency was 93% but you were 35 min short of
-your sleep need. Coach recommends pushing your planned lifts and going to bed slightly
-earlier tonight to recover the deficit.
-```
-
-### "Show me my bench press history"
-
-```
-You: show me bench press history with PRs
-
-Claude calls: whoop_lift_exercise({exercise_id: "BENCHPRESS_BARBELL"})
-
-Returns: {
-  "exercise": {
-    "id": "BENCHPRESS_BARBELL",
-    "name": "Bench Press - Barbell",
-    "muscle_groups": ["CHEST"],
-    "equipment": "BARBELL",
-    "movement_pattern": "HORIZONTAL_PRESS",
-    "laterality": "BILATERAL",
-    "custom": false,
-    "volume_input_format": "WEIGHT",
-    "instructions": ["Lie on the bench with your back and head resting..."],
-    "video_url": "https://dh6o7n168ts9.cloudfront.net/exercise-videos-temp/BENCHPRESS_BARBELL.mp4"
-  },
-  "recent_sessions": [
-    {"date": "May 17, 2026", "top_set": {"reps": 5, "weight": 225, "units": "lbs", "medal": null},
-     "sets": [{"reps": 5, "weight": 225, "units": "lbs", "medal": null}, ...],
-     "total_volume": 5625, "activity_id": "..."},
-    ...
-  ],
-  "personal_records": [
-    {"date": "May 17, 2026", "top_set": {"reps": 5, "weight": 225, "units": "lbs", "medal": "GOLD"},
-     "sets": [...]},
-    ...
-  ]
-}
-
-Claude: Bench Press - Barbell (horizontal press, chest, bilateral). Your current PR
-is 5 reps × 225 lbs (gold medal) set on May 17. Recent sessions have been at the
-same weight — you're maintaining your top set. Volume per session has been around
-5,000-6,000 lbs total tonnage.
-```
-
----
-
-## Project structure
-
-Full file inventory at the time of this README. Run `find src/ -name "*.ts" | wc -l` for current count.
-
-### Source files (115 files total, 17,928 lines including bundled catalogs + scripts)
-
-```
-src/
-├── server.ts                                 42 lines
-├── whoop/                                   (10 files, ~684 lines)
-│   ├── client.ts                            112 lines  HTTP wrapper
-│   ├── cognito.ts                           150 lines  Cognito auth flows
-│   ├── token_manager.ts                      83 lines  Auto-refresh + persistence
-│   ├── write_safety.ts                       30 lines  preview() + withPreview()
-│   ├── build_lift_body.ts                    84 lines  Constructs lift_log body
-│   ├── errors.ts                             47 lines  5 error classes
-│   ├── json_out.ts                            5 lines  JSON.stringify wrapper
-│   ├── constants.ts                           3 lines  BASE_URL, API_VERSION
-│   ├── types.ts                              89 lines  Shared zod schemas
-│   └── session_state.ts                      39 lines  Catalog-gate state
-│
-├── data/                                  (auto-generated, 4 files, ~8,257 lines)
-│   ├── behaviors.ts                       308 entries
-│   ├── exercises.ts                       372 entries
-│   ├── sports.ts                          203 entries
-│   └── endpoints.ts                       384 entries
-│
-├── schemas/                              (22 files, 800 lines)
-│   ├── primitives.ts
-│   ├── today.ts, profile.ts, calendar.ts
-│   ├── recovery.ts, sleep.ts, strain.ts
-│   ├── trend.ts, compare.ts
-│   ├── stress.ts, sleep_need.ts
-│   ├── live.ts
-│   ├── workouts.ts
-│   ├── strength.ts
-│   ├── journal.ts
-│   ├── womens_health.ts
-│   ├── coach.ts, performance.ts
-│   ├── smart_alarm.ts
-│   ├── leaderboard.ts
-│   ├── settings.ts
-│   └── escape.ts
-│
-├── projections/                          (26 files, 1,521 lines)
-│   ├── today.ts (composes home + sleep + state)
-│   ├── profile.ts
-│   ├── calendar.ts
-│   ├── recovery.ts
-│   ├── sleep.ts (DETAILS_GRAPHING_CARD walks)
-│   ├── strain.ts
-│   ├── trend.ts (metrics-as-array)
-│   ├── stress.ts
-│   ├── sleep_need.ts ("8h 23m" parsing)
-│   ├── live_hr.ts, live_state.ts, live_stress.ts
-│   ├── workouts.ts, workout.ts
-│   ├── lift_prs.ts
-│   ├── lift_exercise.ts
-│   ├── lift_progression.ts
-│   ├── lift_history.ts
-│   ├── lift_library.ts
-│   ├── journal.ts
-│   ├── behavior_impact.ts
-│   ├── cycle.ts
-│   ├── performance_assessment.ts
-│   ├── smart_alarm.ts (alarm_bounds composition)
-│   ├── leaderboard.ts
-│   └── hr_zones.ts
-│
-├── tools/                                 (48 files, 2,287 lines)
-│   ├── register.ts (wires 47 tools)      118 lines
-│   └── v2/                               (47 files, 2,169 lines)
-│       └── (one file per tool, see The 47 tools section)
-│
-├── lib/                                  (4 files, ~400 lines)
-│   ├── walk.ts (tree walkers, type coercers, extractSessions, findCardByTitle)
-│   ├── dates.ts
-│   ├── format.ts
-│   └── stats.ts
-│
-└── scripts/
-    └── cognito_bootstrap.ts          One-shot login. (Catalog-regenerators, live-API test runners, and probe scripts are archived in the separate whoop-testing repo — they need raw captures + dummy-account credentials and aren't shipped here.)
-```
-
-### Tests
-
-```
-tests/                                 11 test files, 127 passing
-├── fixtures/                          23 captured API response JSON files
-│   ├── activity_types.json            67 KB    (v2 sports/activity-types)
-│   ├── behavior_summary.json          985 B
-│   ├── bootstrap.json                 1.2 KB
-│   ├── cardio_details.json            300 KB   strength workout
-│   ├── cardio_details_nonstrength.json 1.1 MB  non-strength workout (largest)
-│   ├── deep_dive_recovery.json        21 KB
-│   ├── deep_dive_sleep.json           848 KB   (largest sleep BFF)
-│   ├── deep_dive_strain.json          29 KB
-│   ├── exercise_info.json             1.1 KB
-│   ├── feature_education_state.json   16 KB
-│   ├── home.json                      55 KB
-│   ├── journal_behaviors.json         74 KB
-│   ├── journal_behaviors_v3.json      122 KB
-│   ├── journal_draft.json             821 B
-│   ├── lift_exercise_history.json     12 KB
-│   ├── lift_exercise_prs.json         7 KB
-│   ├── lift_progression.json          11 KB
-│   ├── lift_prs.json                  10 KB
-│   ├── notification_settings.json
-│   ├── overlay_all.json
-│   ├── stress.json                    3 KB
-│   ├── stress_bff.json
-│   └── trend_hrv.json                 117 KB
-│
-├── projections/                       Projection unit tests
-│   ├── round1.test.ts                 Snapshots + deep dives + trends
-│   ├── round2.test.ts                 Workout + lift_progression + journal + lift_prs
-│   └── round3.test.ts                 Lift_exercise + profile
-│
-├── data/
-│   └── catalogs.test.ts               Catalog integrity (308/372/203/384)
-├── whoop/
-│   ├── client.test.ts                 HTTP wrapper tests
-│   ├── parsers.test.ts                Pointing at lib/walk.js
-│   └── types.test.ts                  zod schema parsing
-└── lib/
-    ├── dates.test.ts
-    ├── format.test.ts
-    └── stats.test.ts
-```
-
-### Docs
-
-```
-docs/
-├── WHOOP_API_ENDPOINTS.md            Deep developer doc (5000+ lines)
-├── discovery/
-│   ├── whoop-api-reference.md        Original reverse-engineering summary
-│   ├── api-brief.md                  Opus 4.7-generated brief
-│   ├── behaviors-catalog.md          308 behaviors organized
-│   ├── exercises-catalog.md          372 exercises organized
-│   ├── request-body-reference.md     14 canonical write bodies
-│   ├── behaviors-v2-raw.json         Raw catalog dump
-│   ├── exercises-v2-raw.json         Raw catalog dump
-│   ├── endpoints-dedup-419.txt       Deduped 419-op list
-│   ├── flows.mitm                    Phase 1 raw mitm (122 MB)
-│   ├── flows-phase8.mitm             Phase 8a raw mitm (29 MB)
-│   ├── flows-phase8b.mitm            Phase 8b raw mitm (284 MB)
-│   ├── v2-tool-test-report.md        Live test report (Brian's acct)
-│   └── v2-tool-test-report-dummy.md  Live test report (dummy acct)
-└── superpowers/
-    ├── specs/                        Brainstormed design specs
-    └── plans/                        Task-by-task implementation plans
-```
-
----
-
-## Development guide
-
-### Adding a new tool
-
-Say you want to add a `whoop_recovery_history` tool that returns the last N days of recovery scores in one call.
-
-**1. Pick the source endpoint(s).** Browse `WHOOP_API_ENDPOINTS.md` for the relevant service. For recovery history, the right call is `whoop_trend` with `metric: "RECOVERY"` — but maybe you want a custom shape. Let's say you'll fetch N days of `/home-service/v1/deep-dive/recovery?date=` in parallel.
-
-**2. Add the schema.** Create `src/schemas/recovery_history.ts`:
-
-```ts
-import { z } from "zod";
-
-export const RecoveryHistoryOut = z.object({
-  end_date: z.iso.date(),
-  days: z.array(z.object({
-    date: z.iso.date(),
-    score: z.number().nullable(),
-    state: z.enum(["GREEN", "YELLOW", "RED"]).nullable(),
-    hrv_ms: z.number().nullable(),
-    rhr_bpm: z.number().nullable(),
-  })),
-});
-export type RecoveryHistoryOutT = z.infer<typeof RecoveryHistoryOut>;
-```
-
-**3. Add the projection.** Create `src/projections/recovery_history.ts`:
-
-```ts
-import type { RecoveryHistoryOutT } from "../schemas/recovery_history.js";
-import { projectRecovery } from "./recovery.js";
-
-interface ProjectInput {
-  responses: { date: string; raw: unknown }[];
-  end_date: string;
-}
-
-export function projectRecoveryHistory(input: ProjectInput): RecoveryHistoryOutT {
-  return {
-    end_date: input.end_date,
-    days: input.responses.map(({ date, raw }) => {
-      const r = projectRecovery(raw, date);
-      return { date, score: r.score, state: r.state, hrv_ms: r.hrv.ms, rhr_bpm: r.rhr.bpm };
-    }),
-  };
-}
-```
-
-Reusing `projectRecovery` keeps the day-shape consistent with `whoop_recovery`.
-
-**4. Add the tool.** Create `src/tools/v2/recovery_history.ts`:
-
-```ts
-import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { WhoopClient } from "../../whoop/client.js";
-import { RecoveryHistoryOut } from "../../schemas/recovery_history.js";
-import { projectRecoveryHistory } from "../../projections/recovery_history.js";
-import { WhoopProjectionError } from "../../whoop/errors.js";
-import { jsonOut } from "../../whoop/json_out.js";
-import { todayIso } from "../../lib/dates.js";
-
-export function registerRecoveryHistory(server: McpServer, client: WhoopClient): void {
-  server.tool(
-    "whoop_recovery_history",
-    "Recovery score, HRV, RHR for the last N days. Cheaper than calling whoop_recovery N times.",
-    {
-      days: z.number().int().min(1).max(30).default(7),
-      end_date: z.iso.date().optional(),
-    },
-    async ({ days, end_date }) => {
-      const end = end_date ?? todayIso();
-      const dates = Array.from({ length: days }, (_, i) => {
-        const d = new Date(end);
-        d.setDate(d.getDate() - i);
-        return d.toISOString().slice(0, 10);
-      });
-      const responses = await Promise.all(
-        dates.map(date => client.get("/home-service/v1/deep-dive/recovery", { date })
-          .then(raw => ({ date, raw }))
-          .catch(() => ({ date, raw: null }))
-        )
-      );
-      const projected = projectRecoveryHistory({ responses, end_date: end });
-      try {
-        const out = RecoveryHistoryOut.parse(projected);
-        return { content: [{ type: "text", text: jsonOut(out) }] };
-      } catch (e) {
-        if (e instanceof z.ZodError) throw new WhoopProjectionError("whoop_recovery_history", e);
-        throw e;
-      }
-    },
-  );
-}
-```
-
-**5. Wire it into `register.ts`.** Add the import + the call:
-
-```ts
-// At top
-import { registerRecoveryHistory } from "./v2/recovery_history.js";
-
-// In registerTools()
-registerRecoveryHistory(server, client);
-```
-
-**6. Add a test.** Optional but recommended. Create `tests/projections/recovery_history.test.ts`:
-
-```ts
-import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { projectRecoveryHistory } from "../../src/projections/recovery_history.js";
-import { RecoveryHistoryOut } from "../../src/schemas/recovery_history.js";
-
-const fixture = JSON.parse(readFileSync(resolve("tests/fixtures/deep_dive_recovery.json"), "utf8"));
-
-describe("projectRecoveryHistory", () => {
-  it("projects 3 days of same fixture", () => {
-    const out = projectRecoveryHistory({
-      responses: [
-        { date: "2026-05-23", raw: fixture },
-        { date: "2026-05-22", raw: fixture },
-        { date: "2026-05-21", raw: fixture },
-      ],
-      end_date: "2026-05-23",
-    });
-    expect(() => RecoveryHistoryOut.parse(out)).not.toThrow();
-    expect(out.days).toHaveLength(3);
-    expect(out.days[0]?.score).toBe(78);
-  });
-});
-```
-
-**7. Build + run.**
-
-```bash
-npm run typecheck    # should be clean
-npm test             # should pass
-npm run build        # should output dist/
-```
-
-Restart Claude. The new tool is available.
-
-### Fixing a broken projection
-
-When Whoop changes a response shape, you'll see `WhoopProjectionError` in your Claude output. To fix:
-
-**1. Capture the new raw response.** Use `whoop_raw` to hit the same endpoint and copy the output. Save it to `tests/fixtures/<endpoint>.json`.
-
-**2. Inspect.** Look at the new response shape. Compare to the projection's assumptions.
-
-```bash
-# Quick scan of top-level keys
-node -e "const j = JSON.parse(require('fs').readFileSync('tests/fixtures/x.json','utf8')); console.log(Object.keys(j));"
-
-# Look for a specific section type
-node -e "
-const j = JSON.parse(require('fs').readFileSync('tests/fixtures/x.json','utf8'));
-const types = new Set();
-function walk(n) { if (Array.isArray(n)) n.forEach(walk); else if (n && typeof n === 'object') { if (n.type) types.add(n.type); Object.values(n).forEach(walk); } }
-walk(j);
-console.log(Array.from(types).sort());
-"
-```
-
-**3. Update the projection.** Change the paths it walks. Test against the updated fixture.
-
-**4. Update the schema if needed.** If Whoop added new fields, you may want to expose them — extend the zod schema and the projection's output.
-
-**5. Verify.**
-
-```bash
-npm test -- tests/projections/<projection>.test.ts
-```
-
-### Conventions
-
-**Schema files:** Export both `FooOut` (the zod schema, runtime value) and `FooOutT` (the inferred TypeScript type). Use the type for projection return annotations, use the schema for `.parse()`.
-
-**Projection signatures:** `function projectFoo(raw: unknown, ...args): FooOutT`. Always take `unknown` as input and return a typed object. Never throw — return null/empty arrays for missing data and let zod parse catch it at the boundary.
-
-**Tool descriptions:** First sentence is what the tool returns. Second sentence (optional) is when to use it vs other tools. Keep it under 200 chars — Claude reads this every conversation to pick tools.
-
-**Tool input schemas:** Make required args required, give optional args sane defaults via `.default()`. Use `.describe()` on any arg whose meaning isn't obvious from the name.
-
-**Write-tool input schemas:** Every write tool MUST have `confirm: z.boolean().default(false)`. The handler MUST branch on `confirm` and return a preview when false.
-
-**Error handling:** Wrap `Schema.parse()` in try/catch and rethrow as `WhoopProjectionError("<tool_name>", e)`. Let other errors propagate naturally.
-
-**Logging:** Don't write to stdout from tool handlers. The MCP transport uses stdout for protocol messages, so console.log() can corrupt the wire format. Use `console.error()` for diagnostic output (stderr is safe).
-
----
-
-## Testing
-
-### Run all tests
-
-```bash
-npm test
-```
-
-Output:
-
-```
- Test Files  10 passed (10)
-      Tests  116 passed (116)
-```
-
-### What's tested
-
-| Layer | What | How |
-|---|---|---|
-| `lib/` | Pure functions (date math, formatting, stats) | Unit tests |
-| `whoop/client` | HTTP wrapper, error classification, query/body shaping | `vi.stubGlobal("fetch", mock)` |
-| `whoop/cognito` | Auth flows (covered indirectly through bootstrap script) | Manual + smoke |
-| `whoop/token_manager` | Refresh logic, single-flight, persistence | Mock client |
-| `schemas/*` | zod schemas parse captured fixtures | `Schema.parse(fixture)` |
-| `projections/*` | Raw → flat correctness | Fixture-driven, asserts exact values |
-| `tools/*` | Wiring of schema + projection + client | Mock client tests |
-| `data/*` | Catalog integrity (counts + per-entry parse) | Asserts 308/372/203/384 |
-
-### Running specific tests
-
-```bash
-# All projection tests
-npm test -- tests/projections/
-
-# One specific test file
-npm test -- tests/projections/round1.test.ts
-
-# Watch mode
-npm run test:watch
-```
-
-### Live API testing
-
-The prod repo ships unit-test coverage only (fixtures + projections). Live-API integration tests, the 309-variant parameter matrix, the per-endpoint probes, and the catalog-verification scripts all live in a separate **`whoop-testing`** archive — they need a dummy Whoop account, capture mitm fixtures, and aren't safe to expose to first-time users. If you want to run them, ask Brian.
-
-Past results (snapshot from 2026-05-25):
-- **309 variants** exercised across every tool. **300 OK + 0 fail + 9 expected errors.**
-- **All 25 trend metrics** verified.
-- **Every catalog (372 exercises / 308 behaviors / 203 sports)** matched live API responses 100%.
-- **Every enum** (gender, menstruation, cervical_mucus, movement_pattern, muscle_groups, contraception_type, MCI interest) verified against live API by deliberate probe-then-reject.
-
-### Captured fixtures
-
-`tests/fixtures/*.json` contains 23 raw API response snapshots from real captures. Projection tests assert exact values:
-
-```ts
-it("extracts recovery score (78)", () => {
-  expect(out.score).toBe(78);
-});
-it("extracts HRV current (42 ms)", () => {
-  expect(out.hrv.ms).toBe(42);
-});
-```
-
-If Whoop changes shape and you recapture, expect these assertions to need updating with the new values. Don't change them to make tests pass blindly — verify the new values match what Whoop's app shows.
-
----
-
-## Error handling
-
-### Errors the MCP throws
-
-| Error | When | Recovery |
-|---|---|---|
-| `WhoopAuthExpiredError` | Access token rejected with 401 | TokenManager auto-refreshes on next call |
-| `WhoopServerError` | Whoop returned 5xx | Transient — retry in 30s |
-| `WhoopApiError` | Whoop returned 4xx (non-401) | Read the description to learn what went wrong |
-| `WhoopProjectionError` | Projection emitted data that failed zod parse | Whoop changed shape — capture the new response, update projection |
-
-### Errors Whoop returns
-
-| Status | Body shape | Meaning |
-|---|---|---|
-| 400 | `{code, message, location}` | Validation. `message` is human-readable. `location` gives line/column. |
-| 401 | varies | Token expired. MCP refreshes automatically. |
-| 403 | varies | Permission denied (e.g. community you've left). |
-| 404 | varies | Resource missing or feature not enabled for your account. |
-| 409 | varies | Resource conflict (overlapping time ranges, duplicate writes). |
-| 422 | varies (sometimes empty) | Body validation failed beyond shape — e.g. partial profile PUT. |
-| 428 | varies | Precondition required (rare; `If-Match` missing). |
-| 500 | varies | Server error. The behavior-impact endpoint has known 500s on stale UUIDs. |
-
-### Common scenarios
-
-**"WhoopAuthExpiredError" but I just refreshed."** Your refresh token has likely hit its ~30-day limit. Re-run `npm run cognito-bootstrap`.
-
-**"WhoopApiError 422 on /profile-service/v1/profile."** You're trying a partial profile update. Send a near-complete body (most fields). See `whoop_profile_update` docs.
-
-**"WhoopApiError 400 on /womens-health-service/..."** Your account doesn't have MCI configured. Run the survey via `whoop_raw` to `PUT /health-service/v1/hormonal-insights/settings/mci/survey`.
-
-**"WhoopApiError 409 on /weightlifting-service/v2/weightlifting-workout/activity."** You're trying to log a workout in a time range that conflicts with an existing one. Use different start/end times.
-
-**"WhoopProjectionError for whoop_X."** Capture the new response, update the projection.
-
----
-
-## Token usage analysis
-
-How many output tokens each tool returns, measured against Brian's account (populated) and dummy account (fresh).
-
-### Per-tool output cost
-
-| Tool | Brian's acct | Dummy acct | Notes |
-|---|---|---|---|
-| `whoop_today` | 136 | 120 | Composite of 3 endpoints, well-projected |
-| `whoop_day` | 129 | 113 | Same |
-| `whoop_profile` | 139 | 139 | Identity + privacy state |
-| `whoop_calendar` | 8 | 8 | Empty days don't take much |
-| `whoop_recovery` | 72 | 72 | Just the scores, baselines, contributors |
-| `whoop_sleep` | 127 | 114 | Full stage breakdown |
-| `whoop_strain` | 68 | 68 | Score + zones + steps + cal |
-| `whoop_trend` | 3,073 | 128 | The big one — per-day points × 3 windows. Empty on fresh accts. |
-| `whoop_compare` | 146 | 153 | Side-by-side metric comparison |
-| `whoop_stress` | 37 | 37 | Stress timeline + current |
-| `whoop_sleep_need` | 66 | 66 | Need breakdown |
-| `whoop_live_hr` | 25 | 25 | Just current bpm + state |
-| `whoop_live_state` | 47 | 47 | Activity state |
-| `whoop_live_stress` | 25 | 25 | Just current level |
-| `whoop_workouts` | 317 | 1 | List of recent workouts (empty on dummy) |
-| `whoop_workout` | 122 | n/a | Single workout detail |
-| `whoop_lift_prs` | 497 | 507 | All PRs |
-| `whoop_lift_exercise` | 1,117 | 604 | Composite |
-| `whoop_lift_progression` | 311 | 113 | Volume trend |
-| `whoop_lift_history` | 1 | 1 | Empty on Brian (no recent strength) |
-| `whoop_lift_library` | 333 | 333 | Templates list |
-| `whoop_lift_catalog` | 273 | 273 | Local lookup, search "bench" |
-| `whoop_journal` | 24 | 24 | Empty entry |
-| `whoop_journal_catalog` | 232 | 232 | Lifestyle category × 5 |
-| `whoop_behavior_impact` | 26 | n/a | Requires impact data |
-| `whoop_cycle` | 51 (with MCI) | n/a | Needs contraception_type |
-| `whoop_coach_ask` | ~150 | ~200 | Real response from Coach |
-| `whoop_performance_assessment` | 68 | 67 | |
-| `whoop_smart_alarm` | 143 | 96 | Schedules + preferences |
-| `whoop_smart_alarm_set` | 10 | 10 | Receipt |
-| `whoop_leaderboard` | 142 | 821 | Auto-discovers community |
-| `whoop_hr_zones` | 63 | 63 | Zones + max HR |
-| `whoop_hr_zones_set` | 8 | 8 | Receipt |
-| `whoop_profile_update` | 41 | 71 | Receipt with fields_updated |
-| `whoop_hidden_metric` | 14 | 14 | Toggle receipt |
-| `whoop_activity_create` | 44 | 44 | Receipt with activity_id |
-| `whoop_activity_delete` | 18 | 18 | Receipt with deleted_id |
-| `whoop_lift_log` | 31 | 31 | Receipt |
-| `whoop_lift_template_save` | 24 | 24 | Receipt |
-| `whoop_lift_custom_exercise` | 26 | 26 | Receipt with new exercise_id |
-| `whoop_journal_log` | 14 | 14 | Receipt |
-| `whoop_journal_autopop` | 10 | 10 | Receipt |
-| `whoop_cycle_log` | 9 | 9 | Receipt |
-| `whoop_symptom_log` | 14 | 14 | Receipt |
-| `whoop_raw` | varies | varies | Whatever endpoint you hit |
-| `whoop_endpoints` | 200+ | 200+ | Filter results |
-
-**Aggregate** for one call of every tool: ~8,620 tokens (Brian's account). Realistic session profiles:
-
-- "How am I doing today?" → `whoop_today` + maybe `whoop_recovery`/`whoop_sleep` → **300-500 tokens**
-- "Show my lifting progress" → `whoop_lift_prs` + `whoop_lift_exercise` for 1 exercise → **~1,600 tokens**
-- "Compare this week to last week" → `whoop_compare` → **~150 tokens** (much cheaper than 2× whoop_trend)
-- "Log my workout" → `whoop_lift_log` preview + `whoop_lift_log` confirm → **~100 tokens** total
-
-### Input token cost
-
-Tool definitions live in Claude's context for the duration of the session. The 47 tool definitions cost approximately **~7,000 tokens** at session start (descriptions + input schemas). This is a one-time cost per session.
-
-### Reducing tokens
-
-If you want a cheaper subset for a focused session:
-
-- Comment out tool registrations in `src/tools/register.ts` and rebuild
-- Or use `whoop_endpoints` + `whoop_raw` as a flexible escape hatch without registering the other 45 specific tools
-
----
-
 ## Privacy + security
 
-### Where data lives
-
-| Data | Location | Visible to Claude? |
-|---|---|---|
-| Whoop email | `.env` on your machine | Only if Claude reads `.env` (which it doesn't unless you tell it to) |
-| Whoop password | `.env` on your machine | Same |
-| Access token | `.env` + memory of the running MCP process | Same |
-| Refresh token | `.env` + memory of the running MCP process | Same |
-| Tool input args | Memory, sent to Whoop API | YES — Claude picks them |
-| Tool output | Memory, sent to Claude as text | YES — Claude consumes them |
-
-The MCP process is a Node child of your Claude client. Its environment is yours. Nothing leaves your machine except:
-- Outbound HTTPS to `api.prod.whoop.com`
-- The structured JSON returned by each tool back to Claude
-
-### What Claude can't see
-
-- The contents of `.env`
-- Your password (it's only sent to Whoop's auth endpoint, once)
-- Other MCP servers' data (each MCP is isolated)
-- Your file system, unless you've also wired in the filesystem MCP
-
-### What Claude can see
-
-- The data returned by each tool you let it call
-- The tool descriptions you've registered (so it can pick tools)
-
-### Write safety
-
-Every write tool defaults to `confirm: false`. The preview shape includes what would be sent. You see the preview in chat before any mutation happens.
-
-If you want even tighter control, you can:
-- Remove specific write tools by commenting out their registration in `src/tools/register.ts`
-- Add a global "always require human approval" gate (one of Claude Desktop's settings)
-
-### Open source
-
-The MCP is open source. Every line of code that touches your Whoop data is auditable. No telemetry. No analytics. No external services besides Whoop itself.
+- **Credentials live in `.env` on your machine.** Email, password, access token, refresh token — never leave your filesystem. Claude can't read them (it doesn't have filesystem access unless you wire in a filesystem MCP).
+- **The only outbound traffic is HTTPS to `api.prod.whoop.com`.** No telemetry, no analytics, no third-party servers. The MCP is open source — every line that touches your data is auditable.
+- **Write safety**: every write tool defaults to `confirm: false`. The preview shape includes what would be sent. You see it in chat before any mutation. To go further, remove specific writes from `src/tools/register.ts` or use Claude Desktop's "always require approval" setting.
 
 ---
 
@@ -2563,26 +931,6 @@ This MCP is the only option for **programmatic write access** to your Whoop data
 
 ---
 
-## Roadmap
-
-In rough priority order:
-
-- **Better behavior_impact handling.** Currently returns 500 on fresh accounts. Needs fallback to summary-card endpoint.
-- **Sleep hypnogram extraction.** The projection currently returns an empty array — the captured fixture's hypnogram structure isn't fully mapped yet. PRs welcome.
-- **Live HR endpoint refinement.** Speculative tile names; could improve with another capture session.
-- **Avatar PUT tool.** Currently requires raw PNG bytes; would need a base64 / file-path input wrapper.
-- **Family plan management tools.** Read membership status; not currently wrapped.
-- **Subscription cancel/pause.** Currently can only `resume`, not `cancel`.
-- **Account deletion flow.** Whoop's iOS app has it; we don't.
-- **Apple Watch / Garmin specific endpoints.** Not yet captured (Brian doesn't use them).
-- **Workout sharing to Strava trigger.** Settings GET captured but not the trigger POST.
-- **Data export trigger.** Read endpoint captured; trigger POST not.
-- **Webhook subscription.** Whoop has push notifications for data events; not currently wrapped.
-
-Phase 9 of discovery (more mitm captures of niche flows) would unlock most of these. Phase 10 (catalog of internal admin endpoints) is theoretical.
-
----
-
 ## FAQ
 
 **Q: Is this supported by Whoop?**
@@ -2623,35 +971,12 @@ A: Best-effort. PRs welcome.
 
 ---
 
-## Going deeper
-
-In this repo:
-
-- **[`WHOOP_API_ENDPOINTS.md`](WHOOP_API_ENDPOINTS.md)** — 5,900-line full reverse-engineering writeup. Methodology, every microservice, every endpoint, every body shape, every enum, every status code pattern, auth flows, capture sessions, the dedup pipeline. The single source of truth for API surface knowledge.
-- **[`CHANGELOG.md`](CHANGELOG.md)** — release history.
-- **[`CONTRIBUTING.md`](CONTRIBUTING.md)** — orientation for adding tools or fixing projections.
-- **[`SECURITY.md`](SECURITY.md)** — security policy, threat model, credential hygiene.
-
-Not shipped with this package (lives in a sibling `whoop-testing` archive — ask Brian if you need them):
-
-- Raw catalog dumps (`behaviors-v2-raw.json`, `exercises-v2-raw.json`, `sport_ids-raw.json`, `endpoints-dedup-419.txt`) + the `build_catalogs.ts` regenerator — withheld because the captures contain personal account data
-- Phase 1/8a/8b mitmproxy captures (~450 MB total)
-- The 309-variant live-API test matrix + reports
-- All probe scripts (`probe_auth.ts`, `probe_journal.ts`, etc.)
-- The v1 codebase (a thinner raw-passthrough version, pre-projection-pattern)
-- Brainstormed design specs + implementation plans from the v2 rewrite
-
----
-
 ## Disclaimers
 
-- **This is NOT affiliated with Whoop.** "WHOOP" is a trademark of WHOOP, Inc. This is a community-built tool that interacts with surfaces Whoop has not published. See the [FAQ](#faq) for the practical implications.
-- **Use at your own discretion.** Nobody affiliated with this project is going to recover your account or your historical data if anything goes sideways.
-- **The API surface is reverse-engineered.** Whoop can change response shapes at any time without notice. The zod schemas surface drift as `WhoopProjectionError` instead of silent corruption — see [Fixing a broken projection](#fixing-a-broken-projection) for the recovery loop.
-- **No warranty.** If you 422 something and lose data, that's on you.
-- **Respect Whoop's rate limits.** We've not hit any in normal usage. Don't be the person who triggers a backend alert that gets every user of this MCP banned.
-- **Don't share tokens.** Your `.env` is yours. Don't commit it, don't share it, don't paste it into chats outside this MCP.
-- **Don't share user data.** Your Whoop data is yours. If you write integrations on top of this MCP, respect your users' privacy and their separate consent (which they also haven't given Whoop a chance to revoke).
+- **Not affiliated with Whoop.** "WHOOP" is a trademark of WHOOP, Inc. Community-built tool that interacts with surfaces Whoop has not published. See the [FAQ](#faq) for the practical implications.
+- **No warranty, use at your own discretion.** The API surface is reverse-engineered — Whoop can change response shapes at any time. The zod schemas surface drift as `WhoopProjectionError` instead of silent corruption.
+- **Respect rate limits.** Single-digit RPS in normal use. Don't be the person who triggers a backend alert that gets every user of this MCP banned.
+- **Don't share tokens.** Your `.env` is yours. Don't commit it, don't paste it anywhere.
 
 ---
 
