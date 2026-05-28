@@ -79,6 +79,11 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
 
   const app = express();
   app.disable("x-powered-by");
+  // Behind Fly's (or any) reverse proxy, the client IP is in X-Forwarded-For.
+  // express-rate-limit (used by the SDK's OAuth endpoints) errors if we don't
+  // declare that we trust the proxy — without this it can't identify clients
+  // and throws ValidationError on the /authorize, /token, /register routes.
+  app.set("trust proxy", true);
 
   // CORS — a browser-based MCP client (or the OAuth redirect dance) may hit this.
   app.use((req, res, next) => {
@@ -99,8 +104,17 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
   });
 
   // OAuth 2.1 authorization-server endpoints: /.well-known/oauth-authorization-server,
-  // /.well-known/oauth-protected-resource, /authorize, /token, /register, /revoke.
-  app.use(mcpAuthRouter({ provider, issuerUrl: new URL(publicUrl) }));
+  // /.well-known/oauth-protected-resource/mcp, /authorize, /token, /register, /revoke.
+  //
+  // resourceServerUrl MUST be the actual MCP endpoint (…/mcp), not the root.
+  // Claude's connector validates that the protected-resource metadata's
+  // `resource` matches the URL it's connecting to. If we let it default to the
+  // issuer (root), Claude sees resource=https://host/ ≠ https://host/mcp and
+  // refuses to connect. Setting it to /mcp also serves the metadata at the
+  // RFC 9728 path-specific location /.well-known/oauth-protected-resource/mcp.
+  const issuerUrl = new URL(publicUrl);
+  const resourceServerUrl = new URL(`${publicUrl.replace(/\/$/, "")}/mcp`);
+  app.use(mcpAuthRouter({ provider, issuerUrl, resourceServerUrl }));
 
   // Password-gate handler for the /authorize step. The form rendered by
   // provider.authorize() POSTs here; we validate the password, mint an auth
@@ -142,7 +156,7 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
   // so OAuth clients can discover the authorization server.
   const bearer = requireBearerAuth({
     verifier: provider,
-    resourceMetadataUrl: `${publicUrl.replace(/\/$/, "")}/.well-known/oauth-protected-resource`,
+    resourceMetadataUrl: `${publicUrl.replace(/\/$/, "")}/.well-known/oauth-protected-resource/mcp`,
   });
 
   const mcpHandler = async (req: Request, res: Response): Promise<void> => {
