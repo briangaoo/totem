@@ -337,9 +337,18 @@ docker build -t whoop-mcp .
 
 **Claude Code** speaks remote MCP natively: `claude mcp add whoop --url ... --header ...`.
 
+**claude.ai web + Claude mobile app** can't use a bearer token — their custom-connector UI only supports OAuth. The server includes an OAuth 2.1 + PKCE authorization server for exactly this. Enable it by setting two extra env vars:
+
+```bash
+AUTH_PASSWORD=<a password you'll type once when adding the connector>
+PUBLIC_URL=https://your-app.fly.dev   # your server's public origin (the OAuth issuer)
+```
+
+Then in Claude: **Settings → Connectors → Add custom connector**, paste `https://your-app.fly.dev/mcp`, and Claude walks the OAuth flow. It pops a small password page (served by your server) — enter `AUTH_PASSWORD`, approve, done. The connector then syncs across every device logged into your Claude account (web, desktop, mobile). The password gate means a stranger who finds your URL still can't connect without it. `MCP_AUTH_TOKEN` doubles as the JWT signing secret; leave `AUTH_PASSWORD` unset to disable this path.
+
 **When Cognito expires (~30 days)**: `npm run rebootstrap` from your Mac. Triggers SMS, prompts in your terminal, pushes new tokens to Fly secrets, ~10s restart. Requires being at a machine with the repo + fly CLI.
 
-**Security**: the bearer token is the only thing between a stranger with your URL and full Whoop access. Generate random (`openssl rand -hex 32`), HTTPS only, never commit, rotate if leaked. Constant-time compare on the server. `/health` is the only path without auth.
+**Security**: bearer-token and OAuth paths both gate `/mcp`. Generate the token random (`openssl rand -hex 32`), HTTPS only, never commit, rotate if leaked. OAuth access/refresh tokens are stateless signed JWTs (survive restarts); auth codes are one-time + 60s-lived; PKCE S256 is enforced. `/health` is the only path without auth.
 
 ---
 

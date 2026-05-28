@@ -4,6 +4,15 @@ All notable changes to this project. Format roughly follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+
+- **OAuth 2.1 authorization server (for claude.ai web + Claude mobile connectors).** Claude's custom-connector UI on web/mobile only supports OAuth — there's no bearer-token field — so the bearer setup only worked with Claude Code and the Claude Desktop `mcp-remote` bridge. The HTTP server now embeds a full OAuth 2.1 + PKCE authorization server (via the MCP SDK's `mcpAuthRouter` + a custom `OAuthServerProvider`), so the deployed server can be added as a custom connector and synced across every device on your Claude account.
+  - **Password gate**: the `/authorize` step serves a small password page; the user enters `AUTH_PASSWORD` once when adding the connector. A stranger who finds the URL still can't connect.
+  - **Stateless by design** (survives Fly's auto-stop restarts): access + refresh tokens are HS256 JWTs signed with `MCP_AUTH_TOKEN`; registered clients (dynamic client registration) encode their redirect URIs into a signed `client_id`, so Claude never has to re-register after a cold start. Only the 60-second authorization codes are in-memory.
+  - **Backward compatible**: `/mcp` still accepts the static `MCP_AUTH_TOKEN` bearer (Claude Code + Desktop bridge unchanged). `verifyAccessToken` accepts either.
+  - New env vars: `AUTH_PASSWORD` (enables the OAuth path) and `PUBLIC_URL` (the OAuth issuer origin). Leave `AUTH_PASSWORD` unset to disable.
+  - The HTTP server migrated from raw `node:http` to **Express** (required by the SDK's OAuth router). The per-session McpServer routing is unchanged. 9 new OAuth provider tests + the 9 existing HTTP-auth tests pass (the auth gate now returns spec-correct status codes via the SDK's `requireBearerAuth`).
+
 ### Fixed
 
 - **Timezone, both directions.** Two bugs were causing the AI to see wrong clock values:
