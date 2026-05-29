@@ -7,7 +7,9 @@
 // you to paste the resulting URL rather than scraping it. Custom is a printed
 // guide for any other platform or your own server. Either way it's one command
 // that walks you to a working, Claude-connected deployment.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import {
   c, run, capture, commandExists, genToken, genPassword, copyToClipboard, httpGet,
@@ -404,18 +406,24 @@ async function assistedDeploy(opts: {
       if (!(await promptYesNo("Continue anyway?", false))) return null;
     }
   }
-  const url = await prompt("Paste your deployment's public URL (e.g. https://your-app.up.railway.app)");
-  if (!url.startsWith("http")) { console.log(c.red("  Need a valid https URL.")); return null; }
-  console.log(c.gray(`  Now set PUBLIC_URL so OAuth works: ${opts.setPublicUrlHint(url.replace(/\/$/, ""))}`));
+  let url = (await prompt("Paste your deployment's public URL (e.g. https://your-app.up.railway.app)")).trim();
+  if (url && !/^https?:\/\//i.test(url)) url = "https://" + url; // accept a bare domain
+  if (!/^https?:\/\/[^/.]+\.[^/]+/.test(url)) { console.log(c.red("  Need a valid URL (e.g. https://your-app.up.railway.app).")); return null; }
+  url = url.replace(/\/$/, "");
+  console.log(c.gray(`  Now set PUBLIC_URL so OAuth works: ${opts.setPublicUrlHint(url)}`));
   await promptYesNo("Done setting PUBLIC_URL + redeploying?", true);
-  return url.replace(/\/$/, "");
+  return url;
 }
 
 // RAILWAY — CLI-automatable; best-effort (untested).
 async function deployRailway(ctx: DeployCtx): Promise<string | null> {
-  const env = { ...ctx.env, PUBLIC_URL: "" };
+  // Railway rejects `--set KEY=` (empty value), and PUBLIC_URL isn't known until
+  // `domain` runs — so set the non-empty vars now, PUBLIC_URL in the 2nd pass.
   const varArgs: string[] = ["variables"];
-  for (const [k, v] of Object.entries(env)) varArgs.push("--set", `${k}=${v}`);
+  for (const [k, v] of Object.entries(ctx.env)) {
+    if (v === "") continue;
+    varArgs.push("--set", `${k}=${v}`);
+  }
   return assistedDeploy({
     cliName: "railway",
     install: { npmPkg: "@railway/cli", brewPkg: "railway", manualHint: "npm i -g @railway/cli  (or: brew install railway)" },
@@ -434,35 +442,53 @@ async function deployRailway(ctx: DeployCtx): Promise<string | null> {
 
 // GOOGLE CLOUD RUN — gcloud, builds from source. Best-effort.
 async function deployCloudRun(ctx: DeployCtx): Promise<string | null> {
-  // Cloud Run env vars with commas need a custom delimiter; use ^@^.
-  const envStr = "^@^" + Object.entries({ ...ctx.env, PUBLIC_URL: "" }).map(([k, v]) => `${k}=${v}`).join("@");
-  return assistedDeploy({
-    cliName: "gcloud",
-    install: { manualHint: "install the gcloud SDK: https://cloud.google.com/sdk/docs/install" },
-    loginCheck: () => capture("gcloud", ["config", "get-value", "project"]).stdout.trim().length > 0,
-    loginCmd: async () => {
-      const a = await run("gcloud", ["auth", "login"]);
-      if (a !== 0) return a;
-      console.log(c.gray("  Set your project: gcloud config set project <PROJECT_ID>"));
-      await promptYesNo("Project set?", true);
-      return 0;
-    },
-    steps: [
-      {
-        desc: "deploy from source (Cloud Build builds the Dockerfile)",
-        cmd: ["gcloud", [
-          "run", "deploy", ctx.appName,
-          "--source", ".",
-          "--region", "us-west1",
-          "--allow-unauthenticated",
-          "--port", "3000",
-          `--set-env-vars`, envStr,
-        ]],
+  // Env vars go in a temp YAML file (--env-vars-file), NOT --set-env-vars: values
+  // include an email (with `@`) and a random password, so any inline delimiter can
+  // collide (the `^@^` form broke on the email's `@`). The file lives in the OS
+  // temp dir — never the `--source` upload dir — and is deleted after. PUBLIC_URL
+  // is set in the 2nd pass once the deployed URL is known.
+  const envYaml = Object.entries(ctx.env)
+    .filter(([, v]) => v !== "")
+    .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+    .join("\n") + "\n";
+  const envFile = resolve(tmpdir(), `whoop-mcp-env-${randomUUID()}.yaml`);
+  writeFileSync(envFile, envYaml, { mode: 0o600 });
+  try {
+    return await assistedDeploy({
+      cliName: "gcloud",
+      install: { manualHint: "install the gcloud SDK: https://cloud.google.com/sdk/docs/install" },
+      loginCheck: () => capture("gcloud", ["config", "get-value", "project"]).stdout.trim().length > 0,
+      loginCmd: async () => {
+        const a = await run("gcloud", ["auth", "login"]);
+        if (a !== 0) return a;
+        console.log(c.gray("  Set your project: gcloud config set project <PROJECT_ID>"));
+        await promptYesNo("Project set?", true);
+        return 0;
       },
-    ],
-    setPublicUrlHint: (url) => `gcloud run services update ${ctx.appName} --region us-west1 --update-env-vars PUBLIC_URL=${url}`,
-    ctx,
-  });
+      steps: [
+        {
+          desc: "enable required APIs (run, cloudbuild, artifactregistry)",
+          cmd: ["gcloud", ["services", "enable", "run.googleapis.com", "cloudbuild.googleapis.com", "artifactregistry.googleapis.com"]],
+        },
+        {
+          desc: "deploy from source (Cloud Build builds the Dockerfile)",
+          cmd: ["gcloud", [
+            "run", "deploy", ctx.appName,
+            "--source", ".",
+            "--region", "us-west1",
+            "--allow-unauthenticated",
+            "--port", "3000",
+            "--env-vars-file", envFile,
+            "--quiet",
+          ]],
+        },
+      ],
+      setPublicUrlHint: (url) => `gcloud run services update ${ctx.appName} --region us-west1 --update-env-vars PUBLIC_URL=${url}`,
+      ctx,
+    });
+  } finally {
+    try { rmSync(envFile); } catch { /* best-effort */ }
+  }
 }
 
 // CUSTOM — printed guide for any other platform or your own server.
