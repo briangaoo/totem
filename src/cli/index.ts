@@ -19,6 +19,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { request as httpsRequest } from "node:https";
 import { runCloudSetup, runLocalSetup } from "./setup.js";
+import { runScript } from "./ui.js";
 
 // ── locate package root ──────────────────────────────────────────────────
 // This file lives at one of:
@@ -130,15 +131,15 @@ const commands: Record<string, Cmd> = {
   },
   dev: {
     group: "Local",
-    desc: "Run the server in dev mode (tsx, stdio, no build needed)",
-    run: async () => run(npmBin("tsx"), [resolve(ROOT, "src", "server.ts")]),
+    desc: "Run the server in dev mode (tsx source if available, else built dist)",
+    run: async () => runScript(ROOT, "server", [], { preferSource: true }),
   },
   "dev:http": {
     group: "Local",
-    desc: "Run the server in dev mode (tsx, HTTP)",
+    desc: "Run the server in dev mode, HTTP transport",
     run: async () => {
       const env = { ...process.env, MCP_TRANSPORT: "http" };
-      return run(npmBin("tsx"), [resolve(ROOT, "src", "server.ts")], { env });
+      return runScript(ROOT, "server", [], { preferSource: true, env });
     },
   },
   build: {
@@ -162,14 +163,13 @@ const commands: Record<string, Cmd> = {
   auth: {
     group: "Setup",
     desc: "First-time Whoop (Cognito) login — writes tokens to .env",
-    run: async () => run(npmBin("tsx"), [resolve(ROOT, "src", "scripts", "cognito_bootstrap.ts")]),
+    run: async () => runScript(ROOT, "scripts/cognito_bootstrap"),
   },
   refresh: {
     group: "Setup",
     desc: "Re-auth when the ~30-day token expires (auto if no SMS MFA; prompts if your account has it) + push to your deployment",
     usage: "whoop-mcp refresh [--app <fly-app>]",
-    run: async (args) =>
-      run(npmBin("tsx"), [resolve(ROOT, "src", "scripts", "rebootstrap.ts"), ...args]),
+    run: async (args) => runScript(ROOT, "scripts/rebootstrap", args),
   },
 
   // ── Deployed ─────────────────────────────────────────────────────────

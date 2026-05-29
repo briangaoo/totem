@@ -5,6 +5,8 @@ import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { randomBytes } from "node:crypto";
 import { request as httpsRequest } from "node:https";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 export const useColor = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
 const ANSI = {
@@ -70,6 +72,76 @@ export function commandExists(cmd: string): boolean {
 // 256-bit random hex token (for MCP_AUTH_TOKEN / signing secret).
 export function genToken(): string {
   return randomBytes(32).toString("hex");
+}
+
+// Run a bundled script resiliently. A published install (`npm install -g`)
+// ships the compiled `dist/*.js` and only runtime deps — no `tsx`/`typescript`.
+// A dev checkout has `tsx` + the TypeScript source. Prefer whichever fits:
+// dist+node by default (works everywhere), source+tsx when `preferSource` is set
+// (live dev, picks up edits without a rebuild). `relNoExt` is relative to src/
+// or dist/ without extension, e.g. "scripts/cognito_bootstrap" or "server".
+export function runScript(
+  root: string,
+  relNoExt: string,
+  args: string[] = [],
+  opts: { preferSource?: boolean } & SpawnOptions = {},
+): Promise<number> {
+  const { preferSource = false, ...spawnOpts } = opts;
+  const distJs = resolve(root, "dist", `${relNoExt}.js`);
+  const srcTs = resolve(root, "src", `${relNoExt}.ts`);
+  const tsx = resolve(root, "node_modules", ".bin", "tsx");
+  const viaDist: [string, string] = [process.execPath, distJs];
+  const viaTsx: [string, string] = [tsx, srcTs];
+  const order = preferSource ? [viaTsx, viaDist] : [viaDist, viaTsx];
+  for (const [bin, script] of order) {
+    const binOk = bin === process.execPath || existsSync(bin);
+    if (binOk && existsSync(script)) return run(bin, [script, ...args], { cwd: root, ...spawnOpts });
+  }
+  console.error(c.red(`Can't run ${relNoExt}: need either a built dist/ or the tsx dev dependency.`));
+  console.error(c.gray("Run ") + c.bold("npm install && whoop-mcp build") + c.gray(" in a source checkout, or reinstall the published package."));
+  return Promise.resolve(1);
+}
+
+// Ensure a CLI tool is on PATH; if not, offer to install it (with permission).
+// Tries brew → npm → install script, in that order, based on what's available.
+// Note: a freshly installed tool often isn't on this process's PATH yet, so we
+// re-check and, if still missing, tell the user to re-run in a new shell.
+export async function ensureCli(
+  name: string,
+  opts: { brewPkg?: string; npmPkg?: string; scriptUrl?: string; manualHint: string },
+): Promise<boolean> {
+  if (commandExists(name)) return true;
+  console.log(c.yellow(`  ${name} isn't installed.`));
+  let installCmd: [string, string[]] | null = null;
+  if (opts.brewPkg && commandExists("brew")) installCmd = ["brew", ["install", opts.brewPkg]];
+  else if (opts.npmPkg && commandExists("npm")) installCmd = ["npm", ["install", "-g", opts.npmPkg]];
+  else if (opts.scriptUrl) installCmd = ["sh", ["-c", `curl -fsSL ${opts.scriptUrl} | sh`]];
+  if (!installCmd) {
+    console.log(c.gray(`  Install it manually: ${opts.manualHint}`));
+    return false;
+  }
+  console.log(c.gray(`    $ ${installCmd[0]} ${installCmd[1].join(" ")}`));
+  if (!(await promptYesNo(`Install ${name} now?`, true))) {
+    console.log(c.gray(`  Skipped. Install manually: ${opts.manualHint}`));
+    return false;
+  }
+  if (await run(installCmd[0], installCmd[1]) !== 0) {
+    console.log(c.red(`  ${name} install failed.`) + c.gray(` Try manually: ${opts.manualHint}`));
+    return false;
+  }
+  if (!commandExists(name)) {
+    console.log(c.yellow(`  ${name} installed, but isn't on this shell's PATH yet.`));
+    console.log(c.gray("  Open a new terminal and re-run this command to pick it up."));
+    return false;
+  }
+  return true;
+}
+
+// Open a URL in the default browser, cross-platform. Best-effort, never throws.
+export function openUrl(url: string): void {
+  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  try { spawnSync(cmd, args, { stdio: "ignore" }); } catch { /* best-effort */ }
 }
 
 // GET a URL, resolve with {status, body}. Used for health + OAuth metadata checks.

@@ -12,6 +12,7 @@ import { resolve } from "node:path";
 import {
   c, run, capture, commandExists, genToken, httpGet,
   prompt, promptYesNo, promptChoice, step, closePrompts,
+  runScript, ensureCli, openUrl,
 } from "./ui.js";
 
 // ── .env helpers ────────────────────────────────────────────────────────────
@@ -49,6 +50,20 @@ function writeDeployRecord(root: string, rec: DeployRecord): void {
   writeFileSync(resolve(root, ".whoop-mcp-deploy.json"), JSON.stringify(rec, null, 2));
 }
 
+// ── shared: ensure dependencies are installed (offer to run npm install) ─────
+// A published `npm install -g` already has node_modules; a fresh git checkout
+// that never ran `npm install` does not — without it the build + auth steps
+// would just error out. This keeps the flow zero-setup.
+async function ensureDeps(root: string): Promise<boolean> {
+  if (existsSync(resolve(root, "node_modules"))) return true;
+  console.log(c.yellow("  Dependencies aren't installed yet."));
+  if (!(await promptYesNo("Run `npm install` now?", true))) {
+    console.log(c.red("  Can't continue without dependencies."));
+    return false;
+  }
+  return (await run("npm", ["install"], { cwd: root })) === 0;
+}
+
 // ── shared: ensure we have Whoop tokens (run auth if not) ────────────────────
 async function ensureAuth(root: string): Promise<boolean> {
   const env = readEnv(root);
@@ -70,7 +85,9 @@ async function ensureAuth(root: string): Promise<boolean> {
   console.log(c.gray("Authenticating with Whoop (you'll get an SMS code if your account has MFA)…"));
   // closePrompts so the bootstrap script owns stdin for its own SMS prompt.
   closePrompts();
-  const code = await run(process.execPath, [resolve(root, "node_modules/.bin/tsx"), resolve(root, "src/scripts/cognito_bootstrap.ts")], { cwd: root });
+  // runScript prefers the compiled dist/ (works in a published install with no
+  // tsx), falling back to tsx on source for a dev checkout.
+  const code = await runScript(root, "scripts/cognito_bootstrap");
   if (code !== 0) { console.log(c.red("Auth failed.")); return false; }
   return true;
 }
@@ -79,21 +96,31 @@ async function ensureAuth(root: string): Promise<boolean> {
 export async function runLocalSetup(root: string): Promise<number> {
   console.log(c.bold("\nwhoop-mcp · local setup") + c.gray(" — run the MCP on this machine over stdio\n"));
   const TOTAL = 4;
+  const serverJs = resolve(root, "dist", "server.js");
 
   step(1, TOTAL, "Prerequisites");
   console.log(`  node ${process.version} ${c.green("✓")}`);
+  if (!(await ensureDeps(root))) return 1;
 
   step(2, TOTAL, "Whoop authentication");
   if (!(await ensureAuth(root))) return 1;
   console.log(c.green("  ✓ tokens in .env"));
 
   step(3, TOTAL, "Build");
-  const buildCode = await run(process.execPath, [resolve(root, "node_modules/.bin/tsc")], { cwd: root });
-  if (buildCode !== 0) { console.log(c.red("  Build failed.")); return 1; }
-  console.log(c.green("  ✓ dist/ built"));
+  if (existsSync(serverJs)) {
+    console.log(c.green("  ✓ already built (dist/)"));
+  } else {
+    const tsc = resolve(root, "node_modules", ".bin", "tsc");
+    if (!existsSync(tsc)) {
+      console.log(c.red("  No dist/ and no TypeScript compiler.") + c.gray(" Run `npm install && whoop-mcp build`."));
+      return 1;
+    }
+    const buildCode = await run(process.execPath, [tsc], { cwd: root });
+    if (buildCode !== 0) { console.log(c.red("  Build failed.")); return 1; }
+    console.log(c.green("  ✓ dist/ built"));
+  }
 
   step(4, TOTAL, "Wire into your AI client");
-  const serverJs = resolve(root, "dist", "server.js");
   const client = await promptChoice("Which client?", [
     "Claude Desktop (write config automatically)",
     "Claude Code (print the one-line command)",
@@ -102,8 +129,23 @@ export async function runLocalSetup(root: string): Promise<number> {
 
   if (client === 1) {
     console.log("");
-    console.log(c.gray("Run this:"));
-    console.log(`  claude mcp add whoop ${process.execPath} ${serverJs}`);
+    const manual = `claude mcp add whoop ${process.execPath} ${serverJs}`;
+    if (commandExists("claude")) {
+      if (await promptYesNo("Run `claude mcp add whoop …` for you now?", true)) {
+        if (await run("claude", ["mcp", "add", "whoop", process.execPath, serverJs]) === 0) {
+          console.log(c.green("  ✓ added to Claude Code"));
+        } else {
+          console.log(c.yellow("  That didn't work — run it yourself:"));
+          console.log(`  ${manual}`);
+        }
+      } else {
+        console.log(c.gray("  Run it when ready:"));
+        console.log(`  ${manual}`);
+      }
+    } else {
+      console.log(c.gray("  The `claude` CLI isn't on PATH. Install Claude Code, then run:"));
+      console.log(`  ${manual}`);
+    }
   } else if (client === 0) {
     const home = process.env.HOME ?? "~";
     const cfgPath = resolve(home, "Library/Application Support/Claude/claude_desktop_config.json");
@@ -139,6 +181,7 @@ interface DeployCtx {
 export async function runCloudSetup(root: string): Promise<number> {
   console.log(c.bold("\nwhoop-mcp · cloud setup") + c.gray(" — deploy a server + connect it to Claude (web, desktop, mobile)\n"));
   const TOTAL = 6;
+  if (!(await ensureDeps(root))) return 1;
 
   step(1, TOTAL, "Whoop authentication");
   if (!(await ensureAuth(root))) return 1;
@@ -233,11 +276,9 @@ function printConnectInstructions(url: string, password: string): void {
   console.log(`  3. Password: ${c.brand(password)}`);
   console.log(`  4. Approve. Done — every device on your account now has Whoop.`);
   console.log("");
-  // Best-effort: open the connectors page in the browser.
-  if (process.platform === "darwin") {
-    capture("open", ["https://claude.ai/settings/connectors"]);
-    console.log(c.gray("  (opened the connectors page in your browser)"));
-  }
+  // Best-effort: open the connectors page in the browser (cross-platform).
+  openUrl("https://claude.ai/settings/connectors");
+  console.log(c.gray("  (tried to open the connectors page in your browser)"));
   console.log(c.green("\n✓ Cloud setup complete.\n"));
 }
 
@@ -250,8 +291,12 @@ function setSummary(env: Record<string, string>): void {
 // FLY — fully automated + tested.
 async function deployFly(ctx: DeployCtx): Promise<string | null> {
   if (!commandExists("fly") && !commandExists("flyctl")) {
-    console.log(c.red("  flyctl not found.") + c.gray(" Install: brew install flyctl  (or: curl -L https://fly.io/install.sh | sh)"));
-    return null;
+    const installed = await ensureCli("flyctl", {
+      brewPkg: "flyctl",
+      scriptUrl: "https://fly.io/install.sh",
+      manualHint: "brew install flyctl  (or: curl -L https://fly.io/install.sh | sh)",
+    });
+    if (!installed) return null;
   }
   const fly = commandExists("fly") ? "fly" : "flyctl";
   if (capture(fly, ["auth", "whoami"]).code !== 0) {
@@ -298,7 +343,7 @@ async function deployFly(ctx: DeployCtx): Promise<string | null> {
 // commands, then ask the user to paste the resulting URL (robust vs. parsing).
 async function assistedDeploy(opts: {
   cliName: string;
-  installHint: string;
+  install: { brewPkg?: string; npmPkg?: string; scriptUrl?: string; manualHint: string };
   loginCheck: () => boolean;
   loginCmd: () => Promise<number>;
   steps: Array<{ desc: string; cmd: [string, string[]] }>;
@@ -306,8 +351,7 @@ async function assistedDeploy(opts: {
   ctx: DeployCtx;
 }): Promise<string | null> {
   if (!commandExists(opts.cliName)) {
-    console.log(c.red(`  ${opts.cliName} CLI not found.`) + c.gray(` Install: ${opts.installHint}`));
-    return null;
+    if (!(await ensureCli(opts.cliName, opts.install))) return null;
   }
   if (!opts.loginCheck()) {
     console.log(c.gray(`  Logging into ${opts.cliName}…`));
@@ -336,7 +380,7 @@ async function deployRailway(ctx: DeployCtx): Promise<string | null> {
   for (const [k, v] of Object.entries(env)) varArgs.push("--set", `${k}=${v}`);
   return assistedDeploy({
     cliName: "railway",
-    installHint: "npm i -g @railway/cli  (or: brew install railway)",
+    install: { npmPkg: "@railway/cli", brewPkg: "railway", manualHint: "npm i -g @railway/cli  (or: brew install railway)" },
     loginCheck: () => capture("railway", ["whoami"]).code === 0,
     loginCmd: () => run("railway", ["login"]),
     steps: [
@@ -356,7 +400,7 @@ async function deployKoyeb(ctx: DeployCtx): Promise<string | null> {
   for (const [k, v] of Object.entries({ ...ctx.env, PUBLIC_URL: "" })) envFlags.push("--env", `${k}=${v}`);
   return assistedDeploy({
     cliName: "koyeb",
-    installHint: "curl -fsSL https://cli.koyeb.com/install.sh | sh",
+    install: { scriptUrl: "https://cli.koyeb.com/install.sh", manualHint: "curl -fsSL https://cli.koyeb.com/install.sh | sh" },
     loginCheck: () => capture("koyeb", ["whoami"]).code === 0,
     loginCmd: () => run("koyeb", ["login"]),
     steps: [
@@ -385,7 +429,7 @@ async function deployCloudRun(ctx: DeployCtx): Promise<string | null> {
   const envStr = "^@^" + Object.entries({ ...ctx.env, PUBLIC_URL: "" }).map(([k, v]) => `${k}=${v}`).join("@");
   return assistedDeploy({
     cliName: "gcloud",
-    installHint: "https://cloud.google.com/sdk/docs/install",
+    install: { manualHint: "install the gcloud SDK: https://cloud.google.com/sdk/docs/install" },
     loginCheck: () => capture("gcloud", ["config", "get-value", "project"]).stdout.trim().length > 0,
     loginCmd: async () => {
       const a = await run("gcloud", ["auth", "login"]);
