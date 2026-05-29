@@ -33,38 +33,9 @@
 
 ---
 
-## Quickstart (5 minutes)
-
-```bash
-git clone https://github.com/briangaoo/whoop-mcp.git
-cd whoop-mcp && npm install && npm run build && npm link
-```
-
-Then **one guided command** does everything — auth, setup, and connecting to Claude:
-
-```bash
-# ★ Recommended — deploy to a host + connect Claude on web, desktop, AND mobile:
-whoop-mcp cloud
-
-# Or run it locally on this machine (stdio, this device only):
-whoop-mcp local
-```
-
-**`whoop-mcp cloud`** walks you through: Whoop login (SMS handled) → pick a host (Fly / Railway / Koyeb / Cloud Run / your own server) → it generates secrets, sets env, deploys, verifies the server + OAuth are live, then hands you the URL + password to paste into Claude's connector settings. By the end, Claude is connected across every device on your account.
-
-**`whoop-mcp local`** walks you through: Whoop login → build → writing the Claude Desktop config (or the Claude Code one-liner). Restart Claude and you're done.
-
-When the 30-day token expires, run **`whoop-mcp refresh`** (silent if your account has no SMS MFA; prompts for the code if it does).
-
-Then ask Claude: *"how am I doing today on whoop?"*
-
-> Prefer to wire it up by hand? The guided commands just automate the steps in [The `whoop-mcp` CLI](#the-whoop-mcp-cli), [Remote hosting](#remote-hosting), and [Configuration](#configuration). Stuck? [Troubleshooting](#troubleshooting).
-
----
-
 ## Table of contents
 
-1. [Quickstart (5 minutes)](#quickstart-5-minutes) ← above
+1. [Get Started](#get-started)
 2. [Why this exists](#why-this-exists)
 3. [What it does](#what-it-does)
 4. [Architecture](#architecture)
@@ -83,6 +54,57 @@ Then ask Claude: *"how am I doing today on whoop?"*
 17. [Acknowledgments](#acknowledgments)
 
 **Other root-level docs:** [`TOOLS.md`](TOOLS.md) (full per-tool reference) · [`WHOOP.md`](WHOOP.md) (full API reference) · [`CHANGELOG.md`](CHANGELOG.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`LICENSE`](LICENSE)
+
+---
+
+## Get Started
+
+**Prerequisites:** Node 24+ and a Whoop account (any membership tier).
+
+```bash
+git clone https://github.com/briangaoo/whoop-mcp.git
+cd whoop-mcp && npm install && npm run build && npm link
+```
+
+That puts `whoop-mcp` on your PATH. Now run **one guided command** — each handles Whoop login (SMS included), setup, and connecting to Claude from end to end. Pick how you want to run it:
+
+### ★ Recommended — `whoop-mcp cloud`
+
+Deploys the server to a host and connects it to Claude on **web, desktop, and mobile**, synced across every device on your account. One command walks through:
+
+1. **Whoop login** — email + password, plus the SMS code if your account has MFA. Tokens are saved locally and pushed to the host.
+2. **Pick a host** — Fly (automated + tested), Railway, Koyeb (genuinely free, no card), Google Cloud Run, or your own server (guided Docker steps).
+3. **Secrets** — generates `MCP_AUTH_TOKEN` and asks you to choose a connector password.
+4. **Deploy + verify** — sets env, deploys, confirms `/health` and the OAuth endpoints are live.
+5. **Connect** — opens claude.ai's connector page and prints the URL + password. Paste them into **Settings → Connectors → Add custom connector**, approve, and you're done.
+
+```bash
+whoop-mcp cloud
+```
+
+### Local only — `whoop-mcp local`
+
+Runs the server on this machine over stdio — no hosting, this device only. Walks through Whoop login → build → writing your Claude Desktop config (or printing the Claude Code one-liner). Restart Claude and you're set.
+
+```bash
+whoop-mcp local
+```
+
+### Keeping it alive
+
+Whoop's tokens expire roughly every 30 days. When they do:
+
+```bash
+whoop-mcp refresh
+```
+
+Silent if your account has no SMS MFA; prompts for the code if it does. Pushes fresh tokens to your deployment automatically.
+
+### Check it works
+
+Ask Claude: *"how am I doing today on whoop?"* — you should get structured recovery / sleep / strain back.
+
+> Prefer to wire everything up by hand? The guided commands just automate the steps documented in [The `whoop-mcp` CLI](#the-whoop-mcp-cli), [Remote hosting](#remote-hosting), and [Configuration](#configuration). Stuck? See [Troubleshooting](#troubleshooting).
 
 ---
 
