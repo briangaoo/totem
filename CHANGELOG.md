@@ -9,7 +9,7 @@ All notable changes to this project. Format roughly follows [Keep a Changelog](h
 ### Security
 
 - **OAuth consent gate hardened.** The connector password minimum is now 12 chars (was 4), and `POST /oauth/consent` — a custom route not covered by the SDK's OAuth rate-limiter — now enforces a per-IP fixed-window limit (10 attempts / 15 min → `429`), blunting brute force against the gate to your health data.
-- **Scrubbed real account/community IDs from the bundled endpoint catalog.** `src/data/endpoints.ts` shipped concrete community IDs + user IDs captured during reverse-engineering; they're now templated to `{id}` / `{userId}` (deduped 384 → 326 entries).
+- **Scrubbed every real identifier from the bundled endpoint catalog.** `src/data/endpoints.ts` shipped concrete identifiers captured during reverse-engineering — community + user IDs, a personal email, a device serial + signature, HealthKit pairing tokens, and capture timestamps. All are now templated (`{id}`, `{userId}`, `{email}`, `{strapSerial}`, `{strapSignature}`, `{token}`, `{code}`, `{timestamp}`) and the list deduped (384 → 311 entries). The generator's contract (header comment) is now actually enforced.
 
 ### Fixed
 
@@ -22,10 +22,14 @@ All notable changes to this project. Format roughly follows [Keep a Changelog](h
 ### Added
 
 - **Two guided "one-command" setup flows** — the new recommended way to get going:
-  - **`whoop-mcp cloud`** ★ — walks you through the entire server-hosted path in one command: Whoop auth (SMS handled) → pick a host → generate `MCP_AUTH_TOKEN` + connector password → set env → deploy → verify `/health` + OAuth metadata are live → open claude.ai's connector page and print the URL + password to paste. By the end, Claude is connected across web, desktop, and mobile. Platforms: **Fly** (fully automated + tested), **Railway / Cloud Run** (runs their documented CLIs, then asks you to paste the resulting URL since their output formats vary and aren't author-tested), and **Custom** (printed Docker + env steps for any other host or your own server). OAuth is the default. (Koyeb was dropped before release — its signup now forces a paid $30/mo plan, so it no longer fits a zero-cost path; the Custom/Docker route covers it.)
+  - **`whoop-mcp cloud`** ★ — walks you through the entire server-hosted path in one command: Whoop auth (SMS handled) → pick a host → generate `MCP_AUTH_TOKEN` + connector password → set env → deploy → verify `/health` + OAuth metadata are live → open claude.ai's connector page and print the URL + password to paste. By the end, Claude is connected across web, desktop, and mobile. Platforms: **Fly**, **Railway**, and **Cloud Run** — all fully CLI-automated and tested end-to-end (installs the host CLI if missing, logs you in, deploys, auto-detects the URL, sets `PUBLIC_URL`, verifies `/health` + OAuth) — plus **Custom** (printed Docker + env steps for any other host or your own server). OAuth is the default. (Koyeb was dropped before release — its signup now forces a paid $30/mo plan, so it no longer fits a zero-cost path; the Custom/Docker route covers it.)
   - **`whoop-mcp local`** — guided stdio setup: auth → build → writes the Claude Desktop config (or prints the Claude Code one-liner).
-  - New CLI modules `src/cli/ui.ts` (shared prompts/colors/runners) + `src/cli/setup.ts` (the flows). `cloud` writes a `.whoop-mcp-deploy.json` record so `refresh` knows where to push.
-- **Renamed for clarity**: `whoop-mcp bootstrap` → **`auth`**, `whoop-mcp rebootstrap` → **`refresh`**. `refresh` is auto/silent when the account has no SMS MFA and prompts for the code when it does. Help is now grouped with the two guided commands as the headline; everything else (logs, ping, deploy, start, etc.) stays available as advanced commands.
+  - New CLI modules `src/cli/ui.ts` (shared prompts/colors/runners) + `src/cli/setup.ts` (the flows). `cloud` writes a `.whoop-mcp-deploy.json` record so `auth` knows where to push.
+  - **Warm by default — no cold starts.** Fly deployments now set `min_machines_running = 1` + `auto_stop_machines = "suspend"`, and Cloud Run gets `--min-instances 1`, so the connector never cold-starts — without this, the first request after an idle auto-stop fails while the VM/container boots (~10s). Railway already runs continuously; the printed Custom `docker run` uses `--restart unless-stopped`.
+  - **Interactive UX hardening (both flows).** Animated spinners on every otherwise-silent step (network lookups, health polling, backoff waits — driven by an async `captureAsync` so they actually animate, since `spawnSync` blocks the loop). **Explicit confirmations** before anything sensitive — IAM grants, API enablement, billable deploys, project creation, dependency installs, account switches — each printing the exact command + consequence. **Arrow-key (↑/↓, j/k, number) selection** replacing every numbered prompt, hardened against concatenated/split key delivery and EOF (no more hangs on Ctrl-D). **Account + GCP-project pickers** are now always offered (use current, switch account, or create a project) instead of silently inheriting whatever's active. Plus: auto-generated 18-char connector password copied to the clipboard, and the deployed URL auto-detected (no paste step). Every one of the five paths (Fly/Railway/Cloud Run/Custom + local) was deployed and verified end-to-end through the real CLI.
+- **Banner on every command.** The figlet "WHOOP MCP" banner now prints at the top of *every* `whoop-mcp` invocation (was: only the no-arg help). It's written to **stderr**, so it shows in the terminal without ever polluting stdout — `start`/`dev` keep a clean MCP protocol stream and `version`/`config` stay machine-parseable + pipe-safe.
+- **One `auth` command for all token management** (replaces `bootstrap` + `rebootstrap`). `whoop-mcp auth` logs you into Whoop, saves the tokens to `.env`, and **auto-detects** two things: *new vs re-auth* (whether you already have tokens — messaging only) and *local vs deployed* (reads `.whoop-mcp-deploy.json`). For a deployment it pushes the new tokens to **wherever you actually deployed** — Fly (`fly secrets set`), Railway (`railway variables`), Cloud Run (`gcloud run services update`), printed values for a Custom host — or notes "restart your client" for a local install. Auto/silent when the account has no SMS MFA; prompts for the code when it does. The separate `refresh` command was removed; the guided `cloud`/`local` flows call `auth` internally in tokens-only mode so they don't double-push. Help is grouped with the two guided commands as the headline; everything else (logs, ping, deploy, start, etc.) stays available as advanced commands.
+- **Sleep hypnogram + in-sleep heart rate.** `whoop_sleep` now returns the full **hypnogram** — the per-stage timeline (REM/light/SWS/wake), ~58 segments a night — reconstructed from the deep-dive's per-stage HR-curve points, plus **`sleep_hr`** (avg/min bpm). Both were schema'd but previously returned empty/null. Transition times come from each point's clock label anchored to the sleep window at its midpoint (the graph's `position_x` carries ~40 min of axis padding), emitted in UTC for `localizeTimestamps`. Sleep HRV / respiratory rate / debt / latency stay null — not exposed by the endpoint.
 
 ### Added
 
@@ -67,9 +71,9 @@ All notable changes to this project. Format roughly follows [Keep a Changelog](h
 ### Added
 
 - **`whoop-mcp` CLI.** New first-class command (single binary, installable via `npm link` or, once published, `npm install -g whoop-mcp`) that wraps every npm script plus operational helpers. Works from any directory — the CLI resolves its own install root from `import.meta.url`, so `whoop-mcp deploy` from `~/Desktop` does the same thing as `cd whoop-mcp && fly deploy`.
-- 15 subcommands across 5 groups:
+- Subcommands across 5 groups:
   - **Local**: `start [--http]`, `dev`, `dev:http`, `build`, `test`, `typecheck`
-  - **Setup**: `bootstrap`, `rebootstrap`
+  - **Setup**: `auth` (login + token refresh; pushes to your deployment)
   - **Deployed**: `deploy`, `logs`, `status`, `ping`
   - **Inspect**: `info`, `tools`, `config <stdio|http>`
   - **Help**: `help`, `version` (+ `--help`, `-h`, `--version`, `-v` aliases)
@@ -81,12 +85,12 @@ All notable changes to this project. Format roughly follows [Keep a Changelog](h
 ### Changed
 
 - `package.json` → `bin.whoop-mcp` now points at `./dist/cli/index.js` (was `./dist/server.js`). The MCP server is still bootable via `whoop-mcp start` — this is a CLI surface change, not a server change. Anyone with a Claude Desktop config invoking `whoop-mcp` directly (none of the published quickstarts did this) should switch to `whoop-mcp start` or stay on `node dist/server.js`.
-- `npm run rebootstrap` — wrapper script that combines `npm run cognito-bootstrap` (interactive SMS code prompt) with `fly secrets set` so re-bootstrapping a deployed instance is a single command from your Mac. Auto-detects the Fly app name from `fly.toml`, `$FLY_APP`, or `--app <name>`. Solves the ~30-day refresh-token expiry problem for remote deployments.
-- Troubleshooting + README → Remote hosting now document the recovery flow: when Cognito tokens hit their 30-day wall, you run `npm run rebootstrap` (or `whoop-mcp rebootstrap`), type the SMS code in your terminal, the new tokens get pushed to Fly automatically (~10s restart).
+- Token refresh is folded into `whoop-mcp auth`: re-running it logs you back in and (for a deployment) pushes the new tokens to the host in one command — solving the ~30-day refresh-token expiry for remote deployments.
+- Troubleshooting + README → Remote hosting now document the recovery flow: when Cognito tokens hit their 30-day wall, you run `whoop-mcp auth`, type the SMS code (if your account has MFA), and the new tokens get pushed to your deployment automatically (~10s restart).
 
 ### Known limitation
 
-- The rebootstrap flow still requires you to be at a Mac (or any machine with the repo + `fly` CLI installed). If you're traveling when refresh dies, you're locked out. A future feature would add a `/admin` web route accepting the SMS code from a browser, callable from a phone.
+- The `auth` re-auth flow still requires you to be at a machine with the repo + the platform CLI installed. If you're traveling when the token dies, you're locked out. A future feature would add a `/admin` web route accepting the SMS code from a browser, callable from a phone.
 
 ## [1.1.0] — 2026-05-26
 

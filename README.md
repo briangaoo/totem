@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="whoop-mcp — 48 MCP tools, remote-ready" width="820">
+  <img src="assets/banner.svg" alt="whoop-mcp — 48 tools, 47 microservices, 311 endpoints" width="820">
 </p>
 
 <p align="center">
@@ -24,10 +24,10 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.png" alt="Claude Desktop using whoop-mcp to check today's recovery — 73% green with HRV, resting HR, and sleep performance breakdown" width="820">
+  <img src="assets/demo.png" alt="Claude Desktop using whoop-mcp to check today's recovery — a 56% (yellow) recovery gauge with HRV, resting HR, sleep performance, and respiratory-rate cards, plus Claude's narrative breakdown" width="820">
 </p>
 
-48 tools, structured zod-validated outputs, bundled catalogs (372 exercises, 308 behaviors, 203 sports), write-safety harness, automatic Cognito token refresh, session-scoped catalog gate. TypeScript 6, Node 24, 173 tests.
+48 tools, structured zod-validated outputs, bundled catalogs (372 exercises, 308 behaviors, 203 sports, 311 endpoints), write-safety harness, automatic Cognito token refresh, session-scoped catalog gate. TypeScript 6, Node 24, 178 tests.
 
 > *Note: this works through Whoop's private iOS API rather than the public OAuth API. That isn't what Whoop's terms allow — see the [FAQ](#faq) if you want the full picture before installing.*
 
@@ -92,10 +92,10 @@ whoop-mcp local
 
 ### Keeping it alive
 
-Whoop's tokens expire roughly every 30 days. When they do:
+Whoop's tokens expire roughly every 30 days. When they do, re-run the same command — it re-logs you in and (if you deployed) pushes the new tokens to your server:
 
 ```bash
-whoop-mcp refresh
+whoop-mcp auth
 ```
 
 Silent if your account has no SMS MFA; prompts for the code if it does. Pushes fresh tokens to your deployment automatically.
@@ -113,7 +113,7 @@ Ask Claude: *"how am I doing today on whoop?"* — you should get structured rec
 Whoop ships two APIs:
 
 - The **public developer API** at [`developer.whoop.com`](https://developer.whoop.com/api/) is OAuth2, read-only, and exposes **13 endpoints** under 6 scopes. You get recovery score, sleep stage totals, workout strain, body measurements (3 fields), and HRV/RHR per cycle. No journal, no Strength Trainer, no Whoop Coach, no hypnogram, no stress monitor, no trends, no writes, nothing else. Numeric `sport_id` was removed 2025-09-01.
-- The **private iOS API** is what the actual Whoop app uses — `api.prod.whoop.com` behind AWS Cognito. **384 distinct operations across 47 microservices**, including everything missing from above.
+- The **private iOS API** is what the actual Whoop app uses — `api.prod.whoop.com` behind AWS Cognito. **311 distinct operations across 47 microservices**, including everything missing from above.
 
 This MCP wraps the iOS surface.
 
@@ -122,7 +122,7 @@ This MCP wraps the iOS surface.
 | Capability | Tool |
 |---|---|
 | HRV / RHR / respiratory / VO2 / weight time-series (25 metrics × up to 4 windows) | `whoop_trend` |
-| Hypnogram (per-minute sleep stage timeline) | `whoop_sleep` |
+| Hypnogram (per-stage sleep timeline) + full stage breakdown (ms + %) + in-sleep HR | `whoop_sleep` |
 | Strength Trainer — every set, every workout, full 372-exercise catalog, PRs | `whoop_lift_*` (8 tools) |
 | 308-behavior Journal + behavior impact analysis | `whoop_journal*` (5 tools) |
 | Stress monitor (15-min buckets) | `whoop_stress, whoop_live_stress` |
@@ -229,7 +229,7 @@ Whoop's iOS app uses **AWS Cognito** routed through a Whoop-owned proxy (`/auth-
 | `WhoopServerError` | 5xx | Transient — retry |
 | `WhoopProjectionError` | Projection output failed zod parse | Whoop changed shape — fix the projection |
 
-When refresh-token lifetime expires (~30 days), re-run `whoop-mcp auth` (local) or `whoop-mcp refresh` (deployed). Brand-new SMS code, fresh 30-day window.
+When refresh-token lifetime expires (~30 days), re-run `whoop-mcp auth`. It auto-detects local vs deployed and, for a deployment, pushes the new tokens to it. Brand-new SMS code (if your account has MFA), fresh 30-day window.
 
 ---
 
@@ -267,7 +267,7 @@ Four datasets compiled into the MCP at build time (not fetched at runtime):
 | `behaviors.ts` | 308 | `whoop_journal_catalog` | Journal behavior validation |
 | `exercises.ts` | 372 | `whoop_lift_catalog` | Strength Trainer exercises |
 | `sports.ts` | 203 | `whoop_sports_catalog` | `sport_id` ↔ name |
-| `endpoints.ts` | 384 | `whoop_endpoints` | API path search |
+| `endpoints.ts` | 311 | `whoop_endpoints` | API path search |
 
 **Session-scoped gate**: tools that take IDs from sports/exercises/behaviors refuse to run until the corresponding catalog tool has been called once per session. Keeps ~14k tokens out of the system prompt. AI calling e.g. `whoop_activity_create` first gets `{error: "Must call whoop_sports_catalog first…"}`.
 
@@ -341,7 +341,7 @@ Then in Claude: **Settings → Connectors → Add custom connector**, paste `htt
 
 All of the above is what `whoop-mcp cloud` automates for you — the manual steps here are for reference or hand-rolling.
 
-**When Cognito expires (~30 days)**: `whoop-mcp refresh` from your Mac. Silent if your account has no SMS MFA; prompts for the code if it does. Pushes new tokens to your deployment, ~10s restart. Requires being at a machine with the repo + the platform CLI.
+**When Cognito expires (~30 days)**: `whoop-mcp auth` from your Mac. Silent if your account has no SMS MFA; prompts for the code if it does. Auto-detects your deployment and pushes the new tokens to it (Fly/Railway/Cloud Run/custom), ~10s restart. Requires being at a machine with the repo + the platform CLI.
 
 **Security**: bearer-token and OAuth paths both gate `/mcp`. Generate the token random (`openssl rand -hex 32`), HTTPS only, never commit, rotate if leaked. OAuth access/refresh tokens are stateless signed JWTs (survive restarts); auth codes are one-time + 60s-lived; PKCE S256 is enforced. `/health` is the only path without auth.
 
@@ -363,13 +363,13 @@ Commands by group:
 | Group | Commands |
 |---|---|
 | **Get started** | `cloud` ★ (guided server deploy + Claude connect) · `local` (guided local setup) |
-| **Setup** | `auth` (first Whoop login) · `refresh [--app <name>]` (re-auth when the token expires) |
+| **Setup** | `auth` (log in + save tokens — re-run to re-auth; auto-detects local vs deployed and pushes new tokens to your deployment) |
 | **Deployed** | `deploy` · `logs` · `status` · `ping` |
 | **Local dev** | `start [--http]` · `dev` · `dev:http` · `build` · `test` · `typecheck` |
 | **Inspect** | `info` · `tools` · `config <stdio\|http>` |
 | **Help** | `help` · `version` (+ `--help`, `-v` aliases) |
 
-Most people only ever need the two **Get started** commands plus `refresh`. The rest are for power users — `whoop-mcp ping` ("is my deploy alive"), `whoop-mcp logs`, `whoop-mcp start` (drop-in for `node dist/server.js`), etc.
+Most people only ever need the two **Get started** commands plus `auth` (to re-auth when tokens expire). The rest are for power users — `whoop-mcp ping` ("is my deploy alive"), `whoop-mcp logs`, `whoop-mcp start` (drop-in for `node dist/server.js`), etc.
 
 ---
 
@@ -393,7 +393,7 @@ Most people only ever need the two **Get started** commands plus `refresh`. The 
 > You entered the wrong SMS code (or it timed out). Codes expire after ~3 minutes.
 
 **"WhoopAuthExpiredError" after every call**
-> Your refresh token has expired (>30 days since last bootstrap). For a **local install**, re-run `whoop-mcp auth`. For a **deployed install** (Fly etc.), run `whoop-mcp refresh` from your Mac — it re-bootstraps locally AND pushes the new tokens to your deployed app's secrets in one step. Either way you'll get a fresh SMS code on your phone that you type in the terminal.
+> Your refresh token has expired (>30 days since last login). Re-run `whoop-mcp auth` — it logs you back in, saves the tokens locally, and (if you deployed) auto-detects your host and pushes the new tokens to it in one step. If your account has MFA you'll get a fresh SMS code on your phone to type in the terminal.
 
 **"WhoopServerError: 502" / "503" / "504"**
 > Whoop's servers are having issues. Retry in 30 seconds.
@@ -463,7 +463,7 @@ A: Sure. The MCP doesn't care where it runs. Just make sure your `.env` survives
 A: Each user needs their own `.env` with their own Whoop credentials. Don't share tokens.
 
 **Q: Is there an HTTP transport instead of stdio?**
-A: Not yet. The MCP SDK supports SSE but we haven't wired it. PR welcome.
+A: Yes — set `MCP_TRANSPORT=http` to expose the MCP over Streamable HTTP behind a bearer-token + OAuth 2.1 gate (since v1.1.0). See [Remote hosting](#remote-hosting). stdio stays the default for local Claude Desktop / Claude Code.
 
 **Q: Does this support Claude's Computer Use API?**
 A: It's MCP-compatible — anything that speaks MCP can talk to it.

@@ -44,7 +44,7 @@ npx tsc && npm link          # one-time: builds + puts `whoop-mcp` on PATH
 cp .env.example .env
 # edit .env with your Whoop creds
 whoop-mcp auth
-whoop-mcp test               # 173 tests, <1s
+whoop-mcp test               # 178 tests, <1s
 whoop-mcp typecheck
 whoop-mcp build
 
@@ -98,7 +98,7 @@ Recent precedents to read:
 
 ## Testing
 
-- **`whoop-mcp test`** — 173 unit tests in <1s. Fixture-driven for projections; integration-style for the HTTP transport (`tests/whoop/http_auth.test.ts` spins up a real `http.Server` and hits it with `fetch`).
+- **`whoop-mcp test`** — 178 unit tests in <1s. Fixture-driven for projections; integration-style for the HTTP transport (`tests/whoop/http_auth.test.ts` spins up a real `http.Server` and hits it with `fetch`).
 - **Live-API tests live in a separate `whoop-testing` archive.** They require a dummy account and aren't safe to expose to first-time users. If you want to add or run them, ask Brian.
 - When fixing a projection, update its fixture in `tests/fixtures/` and the corresponding test in `tests/projections/round{1,2,3}.test.ts`.
 - When changing the HTTP transport (`src/server-http.ts`) or auth model, add coverage to `tests/whoop/http_auth.test.ts`. The pattern is: boot a real server on an ephemeral port with a stub `WhoopClient`, then assert with `fetch()`.

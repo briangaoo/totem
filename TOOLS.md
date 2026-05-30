@@ -42,19 +42,21 @@ Recovery score + HRV (with baseline) + RHR (with baseline) + respiratory rate + 
 
 - **Input:** `{date?: string}`
 - **Source:** `GET /home-service/v1/deep-dive/recovery?date=`
-- **Output:** `{date, score, state, hrv:{ms,baseline_ms,delta_pct}, rhr:{bpm,baseline_bpm,delta_pct}, respiratory_rate, spo2_pct, skin_temp_c, sleep_performance_pct, contributors:[{name,direction,detail}], calibration_state}`. Full schema in `src/schemas/recovery.ts`.
+- **Output:** `{date, score, state, hrv:{ms,baseline_ms,delta_pct}, rhr:{bpm,baseline_bpm,delta_pct}, respiratory_rate, spo2_pct, skin_temp_c, sleep_performance_pct, contributors:[{name,direction,detail}], calibration_state}`. Full schema in `src/schemas/recovery.ts`. (In the current SCORE_GAUGE/CONTRIBUTORS_TILE shape, `contributors` returns `[]` and `calibration_state` returns `null` — the per-metric data lives in the typed `hrv`/`rhr`/`respiratory_rate`/`spo2_pct`/`skin_temp_c`/`sleep_performance_pct` fields above.)
 - **Walk shape (new):** `SCORE_GAUGE { id: "RECOVERY_SCORE_GAUGE" }.content.score_display` for the score, `CONTRIBUTORS_TILE { id: "RECOVERY_CONTRIBUTORS_TILE" }.content.metrics[]` for each contributor. Each metric carries `status` (today's value) and `status_subtitle` (baseline — API-provided, not computed). Whoop migrated from `GRAPHING_CARD` tiles to this shape in May 2026; the projection was rewritten on 2026-05-26.
 - **Baseline:** unlike the old projection (which computed a 6-day rolling mean), baselines now come straight from the API in `status_subtitle`. Same field on the wire, no client-side math.
 - **SpO2 / skin_temp:** populated only on 4.0+ straps. The new contributors tile includes `CONTRIBUTORS_TILE_SPO2` and `CONTRIBUTORS_TILE_SKIN_TEMPERATURE` when present.
 
 #### `whoop_sleep`
-Sleep duration, time in bed, efficiency, performance, consistency, all 4 stages (REM / LIGHT / SWS / AWAKE) with ms + percent, hypnogram timeline, disturbances, sleep HR + HRV.
+Sleep duration, time in bed, efficiency, performance, consistency, all 4 stages (REM / LIGHT / SWS / AWAKE) with ms + percent, the full hypnogram (per-stage timeline), in-sleep heart rate (avg/min), disturbances.
 
 - **Input:** `{date?: string}`
 - **Source:** `GET /home-service/v1/deep-dive/sleep/last-night?date=`
 - **Output:** `{date, started_at, ended_at, total_sleep_ms, time_in_bed_ms, efficiency_pct, performance_pct, consistency_pct, debt_ms, latency_ms, stages: {rem_ms, rem_pct, light_ms, light_pct, sws_ms, sws_pct, wake_ms, wake_pct}, hypnogram: [{started_at, ended_at, stage}], disturbances, sleep_hr: {avg_bpm, min_bpm}, sleep_hrv_ms, respiratory_rate}`
 
 Note: the underlying endpoint is 848 KB. The projection extracts ~500 chars.
+
+**Partially populated** — `sleep_hrv_ms`, `respiratory_rate`, `debt_ms`, `latency_ms` aren't exposed by this endpoint and return `null`. Everything else **is** populated: the per-stage durations + percentages (REM/light/SWS/wake), the **`hypnogram`** (reconstructed from the per-stage HR-curve points — timed off their clock labels, anchored to the sleep window), and **`sleep_hr`** (avg/min).
 
 #### `whoop_strain`
 Day strain + HR zone time buckets + steps + strength activity time + workouts count.
@@ -139,7 +141,7 @@ Full detail of one activity: HR curve, HR zone durations, calories, distance. St
 
 - **Input:** `{activity_id: string}`
 - **Source:** `GET /core-details-bff/v1/cardio-details?activityId=` (300 KB response)
-- **Output:** `{id, sport_name, start, end, duration_ms, strain, calories, distance_m, avg_hr_bpm, max_hr_bpm, zone_durations: HrZoneDurations, hr_curve: [{at, bpm}], msk: {total_volume_kg, intensity_pct, strain_score, is_strength_workout}}`
+- **Output:** `{id, sport_name, start, end, duration_ms, strain, calories, distance_m, avg_hr_bpm, max_hr_bpm, zone_durations: HrZoneDurations, hr_curve: [{at, bpm}], msk: {total_volume_kg, intensity_pct, strain_score, is_strength_workout}}` (`distance_m` is currently always `null` — not extracted from `/cardio-details`)
 
 #### `whoop_activity_create` ⚠️ WRITE (gated by `whoop_sports_catalog`)
 Create a generic activity (manual entry — for when you did something without wearing the strap, or want to add a record after the fact).
@@ -188,7 +190,7 @@ Volume trend for a single exercise across week / month / 6-month / year windows.
 - **Input:** `{exercise_id: string, end_date?: string}`
 - **Gate:** rejects until `whoop_lift_catalog` has been called once in the session.
 - **Source:** `GET /progression-service/v3/exercise/{id}?endDate=`
-- **Output:** `{exercise_id, end_date, segments: [{label, start_date, end_date, avg_volume, delta_pct, unit, points: [{date, volume, reps, top_weight}]}]}`
+- **Output:** `{exercise_id, end_date, segments: [{label, start_date, end_date, avg_volume, delta_pct, unit, points: [{date, volume, reps, top_weight}]}]}` (per-point `reps` and `top_weight` are currently always `null` — the progression graph only exposes volume)
 
 #### `whoop_lift_history`
 Recent Strength Trainer workouts with **per-exercise aggregates** (set count, total reps, tonnage, medals). Distinct from `whoop_workouts` which gives a generic activity list with no exercise breakdown.
@@ -415,7 +417,7 @@ Call any Whoop endpoint directly. The escape hatch for endpoints not yet wrapped
 - **Pairs with `whoop_endpoints`** — call that first to discover paths, then use `whoop_raw` to hit them.
 
 #### `whoop_endpoints`
-Search the bundled catalog of 384 deduped endpoint paths.
+Search the bundled catalog of 311 deduped endpoint paths.
 
 - **Input:** `{filter?: string, method?: "GET"|"POST"|"PUT"|"DELETE", limit?: number}`
 - **Source:** Bundled `src/data/endpoints.ts`
