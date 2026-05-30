@@ -23,9 +23,9 @@ import {
 //       {id, bar_graph_tile_title_display, bar_graph_tile_percentage_display, bar_graph_tile_time_display}
 //   DETAILS_METRIC_TILES "WAKE EVENTS" → disturbances count
 //
-// Note: the BFF doesn't currently expose sleep HR / HRV / respiratory rate during
-// sleep as named fields. Hypnogram is in the LINE_PLOT / OVERLAY_PLOT but the
-// stage timeline isn't trivially extractable from this fixture — flagged as null.
+// Hypnogram + in-sleep HR (avg/min) are reconstructed from the per-stage HR-curve
+// points — see buildSleepTimeline below. Sleep HRV / respiratory rate / debt /
+// latency aren't exposed by this endpoint as named fields and stay null.
 
 function arrowStat(card: Record<string, unknown> | null): string | null {
   if (!card) return null;
@@ -67,6 +67,121 @@ function stageTime(raw: unknown, stageId: string): { ms: number | null; pct: num
   const timeDisplay = asString(bar.bar_graph_tile_time_display);
   const pctDisplay = asString(bar.bar_graph_tile_percentage_display);
   return { ms: timeLabelToMs(timeDisplay), pct: labelToNumber(pctDisplay) };
+}
+
+// ---- Hypnogram + in-sleep HR ------------------------------------------------
+// Whoop draws the in-sleep HR curve as four LINE_PLOTs (one per stage, so each
+// can be colored differently). Every point carries data_scrubber_details with:
+//   scrubber_style                 → the sleep stage at that instant
+//   value_display (+ "bpm")        → heart rate
+//   secondary_contextual_display   → a local clock label, e.g. "1:24 AM"
+// The four plots share one X axis, so merging + sorting by position_x yields the
+// chronological timeline. We time the segments from the *clock labels*, not
+// position_x — the graph axis has ~40min of padding that skews position_x.
+
+const STAGE_MAP: Record<string, "AWAKE" | "LIGHT" | "REM" | "SWS"> = {
+  AWAKE: "AWAKE",
+  LIGHT_SLEEP: "LIGHT",
+  REM_SLEEP: "REM",
+  SWS_SLEEP: "SWS",
+};
+
+interface StagePoint {
+  x: number;
+  stage: "AWAKE" | "LIGHT" | "REM" | "SWS";
+  bpm: number | null;
+  clockMin: number | null;
+}
+
+// "1:24 AM" / "11:52 PM" → minutes since midnight (0..1439), or null.
+function parseClockMinutes(s: string | null): number | null {
+  if (!s) return null;
+  const m = /^(\d{1,2}):(\d{2})\s*([AP]M)$/i.exec(s.trim());
+  if (!m) return null;
+  let h = parseInt(m[1]!, 10);
+  const min = parseInt(m[2]!, 10);
+  const pm = m[3]!.toUpperCase() === "PM";
+  if (pm && h !== 12) h += 12;
+  if (!pm && h === 12) h = 0;
+  return h * 60 + min;
+}
+
+function collectStagePoints(raw: unknown): StagePoint[] {
+  const out: StagePoint[] = [];
+  function walk(n: unknown): void {
+    if (Array.isArray(n)) {
+      for (const v of n) walk(v);
+      return;
+    }
+    if (!isObject(n)) return;
+    const dsd = isObject(n.data_scrubber_details) ? (n.data_scrubber_details as Record<string, unknown>) : null;
+    const style = dsd ? asString(dsd.scrubber_style) : null;
+    const mapped = style ? STAGE_MAP[style] : undefined;
+    const x = asNumber(n.position_x);
+    if (dsd && mapped && x !== null) {
+      out.push({
+        x,
+        stage: mapped,
+        bpm: asNumber(dsd.value_display),
+        clockMin: parseClockMinutes(asString(dsd.secondary_contextual_display)),
+      });
+    }
+    for (const v of Object.values(n)) walk(v);
+  }
+  walk(raw);
+  out.sort((a, b) => a.x - b.x);
+  return out;
+}
+
+// Build the stage timeline (hypnogram) + in-sleep HR (avg/min) from the points.
+// Timestamps: clock labels give wall-clock minutes; we make them monotonic
+// (handling the midnight wrap), then map them onto the UTC sleep window anchored
+// at the *midpoint*. The data is inset ~symmetrically at both ends, so the
+// midpoint of the clock span lines up with the midpoint of [start, end] — which
+// sidesteps both the axis padding and any timezone knowledge. We emit UTC and
+// let json_out localize for display.
+function buildSleepTimeline(
+  points: StagePoint[],
+  startIso: string | null,
+  endIso: string | null,
+): { hypnogram: SleepOutT["hypnogram"]; sleep_hr: SleepOutT["sleep_hr"] } {
+  const bpms = points.map((p) => p.bpm).filter((b): b is number => b !== null);
+  const sleep_hr = bpms.length
+    ? { avg_bpm: Math.round(bpms.reduce((a, b) => a + b, 0) / bpms.length), min_bpm: Math.min(...bpms) }
+    : { avg_bpm: null, min_bpm: null };
+
+  const startMs = startIso ? Date.parse(startIso) : NaN;
+  const endMs = endIso ? Date.parse(endIso) : NaN;
+  const clocked = points.filter((p) => p.clockMin !== null);
+  if (clocked.length < 2 || Number.isNaN(startMs) || Number.isNaN(endMs)) {
+    return { hypnogram: [], sleep_hr };
+  }
+
+  // Monotonic elapsed minutes from the first point's clock label.
+  const rel: number[] = [0];
+  for (let i = 1; i < clocked.length; i++) {
+    let delta = clocked[i]!.clockMin! - clocked[i - 1]!.clockMin!;
+    if (delta < -720) delta += 1440; // crossed midnight
+    rel.push(rel[i - 1]! + delta);
+  }
+  const relMid = (rel[0]! + rel[rel.length - 1]!) / 2;
+  const utcMid = (startMs + endMs) / 2;
+  const tsAt = (i: number): string => new Date(utcMid + (rel[i]! - relMid) * 60000).toISOString();
+
+  // Group consecutive same-stage runs into [started_at, ended_at, stage] segments.
+  const hypnogram: SleepOutT["hypnogram"] = [];
+  let runStart = 0;
+  for (let i = 1; i <= clocked.length; i++) {
+    if (i === clocked.length || clocked[i]!.stage !== clocked[runStart]!.stage) {
+      hypnogram.push({
+        started_at: tsAt(runStart),
+        ended_at: tsAt(Math.min(i, clocked.length - 1)),
+        stage: clocked[runStart]!.stage,
+      });
+      runStart = i;
+    }
+  }
+  return { hypnogram, sleep_hr };
 }
 
 export function projectSleep(raw: unknown, date: string): SleepOutT {
@@ -127,10 +242,14 @@ export function projectSleep(raw: unknown, date: string): SleepOutT {
     }
   }
 
+  const startedAt = params ? asString(params.start_time) : null;
+  const endedAt = params ? asString(params.end_time) : null;
+  const { hypnogram, sleep_hr } = buildSleepTimeline(collectStagePoints(raw), startedAt, endedAt);
+
   return {
     date,
-    started_at: params ? asString(params.start_time) : null,
-    ended_at: params ? asString(params.end_time) : null,
+    started_at: startedAt,
+    ended_at: endedAt,
     total_sleep_ms: totalSleepMs,
     time_in_bed_ms: timeInBedMs,
     efficiency_pct: efficiencyPct,
@@ -148,9 +267,9 @@ export function projectSleep(raw: unknown, date: string): SleepOutT {
       wake_ms: wake.ms,
       wake_pct: wake.pct,
     },
-    hypnogram: [],
+    hypnogram,
     disturbances,
-    sleep_hr: { avg_bpm: null, min_bpm: null },
+    sleep_hr,
     sleep_hrv_ms: null,
     respiratory_rate: null,
   };

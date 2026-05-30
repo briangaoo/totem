@@ -122,6 +122,23 @@ describe("projectSleep (captured)", () => {
     expect(out.stages.light_ms).not.toBeNull();
     expect(out.stages.sws_ms).not.toBeNull();
   });
+  it("reconstructs the hypnogram (stage timeline within the sleep window)", () => {
+    expect(out.hypnogram.length).toBeGreaterThan(10);
+    expect(out.hypnogram.some((s) => s.stage === "REM")).toBe(true);
+    expect(out.hypnogram.some((s) => s.stage === "SWS")).toBe(true);
+    expect(out.hypnogram.some((s) => s.stage === "AWAKE")).toBe(true);
+    const first = Date.parse(out.hypnogram[0]!.started_at);
+    const last = Date.parse(out.hypnogram.at(-1)!.ended_at);
+    expect(last).toBeGreaterThan(first);
+    // anchored to the real sleep window (within a minute of [start, end])
+    expect(first).toBeGreaterThanOrEqual(Date.parse(out.started_at!) - 60000);
+    expect(last).toBeLessThanOrEqual(Date.parse(out.ended_at!) + 60000);
+  });
+  it("extracts in-sleep HR (avg + min)", () => {
+    expect(out.sleep_hr.avg_bpm!).toBeGreaterThan(40);
+    expect(out.sleep_hr.avg_bpm!).toBeLessThan(120);
+    expect(out.sleep_hr.min_bpm!).toBeLessThanOrEqual(out.sleep_hr.avg_bpm!);
+  });
 });
 
 describe("projectToday for whoop_day (state=null, past date)", () => {
