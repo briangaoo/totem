@@ -558,9 +558,13 @@ async function deployRailway(ctx: DeployCtx): Promise<string | null> {
     loginCheck: () => capture("railway", ["whoami"]).code === 0,
     loginCmd: () => run("railway", ["login"]),
     steps: [
-      { desc: "create/link a project", cmd: ["railway", ["init", "--name", ctx.appName]] },
-      { desc: "set environment variables", cmd: ["railway", varArgs] },
-      { desc: "deploy (uploads + builds the Dockerfile)", cmd: ["railway", ["up", "--detach"]] },
+      // `railway init` creates a PROJECT, not a service; `railway variables` needs
+      // a service. `railway up` is what creates the service, so it must run first
+      // (it deploys env-less + crashes once, then the variables step redeploys it
+      // healthy — Railway auto-redeploys when variables change).
+      { desc: "create the project", cmd: ["railway", ["init", "--name", ctx.appName]] },
+      { desc: "deploy (creates the service + builds the Dockerfile)", cmd: ["railway", ["up", "--detach"]] },
+      { desc: "set environment variables (redeploys with them)", cmd: ["railway", varArgs] },
       { desc: "generate a public domain", cmd: ["railway", ["domain"]] },
     ],
     setPublicUrlCmds: (url) => [

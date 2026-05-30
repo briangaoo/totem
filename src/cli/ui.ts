@@ -63,9 +63,12 @@ export function capture(cmd: string, args: string[], opts: SpawnOptions = {}): {
   return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-// Is a CLI tool on PATH?
+// Is a CLI tool on PATH? Uses which/where (real executables) rather than the
+// `command -v` shell builtin, so we avoid `shell: true` — which both triggers
+// Node 25's DEP0190 warning and is an injection risk.
 export function commandExists(cmd: string): boolean {
-  const r = spawnSync(process.platform === "win32" ? "where" : "command", process.platform === "win32" ? [cmd] : ["-v", cmd], { encoding: "utf8", shell: process.platform !== "win32" });
+  const probe = process.platform === "win32" ? "where" : "which";
+  const r = spawnSync(probe, [cmd], { encoding: "utf8" });
   return (r.status ?? 1) === 0 && (r.stdout ?? "").trim().length > 0;
 }
 
