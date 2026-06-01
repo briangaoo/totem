@@ -1,9 +1,8 @@
 # ─── secrets ───────────────────────────────────────────────────────────────
-.env
-.env.local
-.env.*.local
-.env.test
-.env.deploy
+# Catch-all so NO env variant is ever committable — incl. .env.local,
+# .env.deploy, and any .env.bak* / .env.save backup a tool or human makes.
+.env*
+!.env.example
 
 # ─── build output ──────────────────────────────────────────────────────────
 dist/

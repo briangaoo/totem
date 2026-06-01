@@ -1,6 +1,8 @@
 node_modules
 dist
-.env
+.env*
+.whoop-mcp-deploy.json
+fly.toml
 .git
 .gitignore
 .vitest-cache
