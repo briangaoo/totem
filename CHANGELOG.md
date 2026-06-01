@@ -4,6 +4,13 @@ All notable changes to this project. Format roughly follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-05-31
+
+### Changed
+
+- **The Whoop password is now hidden as you type** during `whoop-mcp auth` / `cloud` / `local`. It previously echoed in plaintext — fine in private, but exposed on a screen-share or recording. Implemented with an explicit raw-mode reader (terminal echo off, characters captured but never rendered), masked in both the guided-flow prompt and the standalone `auth` script. Everything else stays visible (email, MFA code, the auto-generated connector password).
+- **New demo.** Replaced the static screenshot with a ~2-minute screen recording of the full `whoop-mcp cloud` flow (`assets/demo.mp4`): install → Whoop login → Fly deploy → Claude connector → first query. The README loads it from GitHub, so it isn't bundled into the npm package.
+
 ## [1.2.1] — 2026-05-31
 
 A correctness + stealth pass. Every read and write tool was exercised individually against a live account (each call's raw API exchange compared with the projected output and the state read back), which surfaced a class of "returns HTTP 200 but the payload is empty or wrong" bugs that receipt-only testing missed.

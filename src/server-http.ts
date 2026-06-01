@@ -65,7 +65,7 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
       if (existing) return existing;
     }
     const newId = randomUUID();
-    const newServer = new McpServer({ name: "whoop", version: "1.2.1" });
+    const newServer = new McpServer({ name: "whoop", version: "1.2.2" });
     registerTools(newServer, client);
     const newTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => newId,

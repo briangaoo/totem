@@ -24,7 +24,10 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.png" alt="Claude Desktop using whoop-mcp to check today's recovery — a 56% (yellow) recovery gauge with HRV, resting HR, sleep performance, and respiratory-rate cards, plus Claude's narrative breakdown" width="820">
+  <video src="https://github.com/briangaoo/whoop-mcp/raw/main/assets/demo.mp4" controls muted width="820"></video>
+</p>
+<p align="center">
+  <sub><a href="https://github.com/briangaoo/whoop-mcp/raw/main/assets/demo.mp4">▶ Watch the 2-min demo</a> — the full <code>whoop-mcp cloud</code> flow: install → Whoop login → Fly deploy → Claude connector → first query.</sub>
 </p>
 
 48 tools, structured zod-validated outputs, bundled catalogs (372 exercises, 308 behaviors, 203 sports, 311 endpoints), write-safety harness, automatic Cognito token refresh, session-scoped catalog gate. TypeScript 6, Node 24, 212 tests.
