@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { resolve, dirname } from "node:path";
 import {
   c, run, capture, captureAsync, commandExists, genToken, genPassword, copyToClipboard, httpGet,
-  prompt, promptYesNo, select, confirmStep, step, closePrompts,
+  prompt, promptHidden, promptYesNo, select, confirmStep, step, closePrompts,
   withSpinner, spin, pause, maskArgs,
   runScript, ensureCli, openUrl,
 } from "./ui.js";
@@ -84,7 +84,7 @@ async function ensureAuth(root: string): Promise<boolean> {
     upsertEnv(root, { WHOOP_EMAIL: email });
   }
   if (!readEnv(root).WHOOP_PASSWORD) {
-    const pw = await promptRequired("Your Whoop account password (stored only in local .env, used once)");
+    const pw = await promptRequired("Your Whoop account password (stored only in local .env, used once)", { hidden: true });
     upsertEnv(root, { WHOOP_PASSWORD: pw });
   }
   console.log(c.gray("Authenticating with Whoop (you'll get an SMS code if your account has MFA)…"));
@@ -649,10 +649,10 @@ async function promptUrl(message: string): Promise<string> {
 // Ask for a required free-text value, re-asking (with a reason) on empty or
 // invalid input instead of bailing the flow. Optional validator returns an error
 // string to show + re-ask, or null when the value is good. Ctrl-C is the way out.
-async function promptRequired(message: string, opts: { validate?: (v: string) => string | null } = {}): Promise<string> {
+async function promptRequired(message: string, opts: { validate?: (v: string) => string | null; hidden?: boolean } = {}): Promise<string> {
   const tty = Boolean(process.stdin.isTTY);
   for (;;) {
-    const v = (await prompt(message)).trim();
+    const v = (await (opts.hidden ? promptHidden(message) : prompt(message))).trim();
     if (v) {
       const err = opts.validate ? opts.validate(v) : null;
       if (!err) return v;

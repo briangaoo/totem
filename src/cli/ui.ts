@@ -286,14 +286,11 @@ export function ping(url: string, timeoutMs = 10_000): Promise<number> {
 async function ask(query: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   // Ctrl-C during a text prompt: readline swallows SIGINT (emits it on the
-  // interface, so it never reaches the process). Handle it here — restore the
-  // cursor, drop to a fresh line, and exit immediately.
+  // interface). Handle it here — restore the cursor, drop a line, exit.
   rl.on("SIGINT", () => { process.stderr.write("\x1b[?25h"); process.stdout.write("\n"); process.exit(130); });
   try {
-    // Race the answer against the stream closing: on EOF (Ctrl-D, piped input
-    // that ran out, a closed stdin) `rl.question` can hang forever instead of
-    // rejecting, which would freeze the whole guided flow. Resolving "" on close
-    // lets the caller fall back to its default rather than looking broken.
+    // Resolve "" if the stream closes (EOF) so the caller falls back to its
+    // default instead of hanging.
     return await new Promise<string>((resolve) => {
       rl.once("close", () => resolve(""));
       rl.question(query).then((a) => resolve(a.trim())).catch(() => resolve(""));
@@ -310,6 +307,48 @@ export async function prompt(question: string, fallback = ""): Promise<string> {
   const suffix = fallback ? c.gray(` [${fallback}]`) : "";
   const answer = await ask(`${c.violet("?")} ${c.white(question)}${suffix}${c.gray(" ›")} `);
   return answer || fallback;
+}
+
+// Like `ask`, but typed characters are NOT echoed — standard password-prompt
+// behavior, so a secret never appears on screen (or on camera). The override
+// lets the prompt itself and the commit newline through and swallows every
+// per-character echo; readline still captures the full value in its buffer.
+async function askHidden(query: string): Promise<string> {
+  // Explicit raw-mode read: readline's _writeToOutput trick doesn't reliably
+  // disable the TERMINAL's own echo, so the secret can still render. Here we set
+  // raw mode ourselves (terminal echo off), read char-by-char, and echo nothing
+  // — the password never appears on screen. Falls back to a normal line read
+  // when there's no TTY to put in raw mode (piped/CI).
+  const stdin = process.stdin;
+  if (!(stdin.isTTY && typeof stdin.setRawMode === "function")) return ask(query);
+
+  process.stdout.write(query);
+  return new Promise<string>((resolve) => {
+    let buf = "";
+    const cleanup = (): void => {
+      stdin.removeListener("data", onData);
+      try { stdin.setRawMode(false); } catch { /* */ }
+      stdin.pause();
+    };
+    const onData = (chunk: string): void => {
+      for (const ch of chunk) {
+        if (ch === "\r" || ch === "\n" || ch === "\u0004") { cleanup(); process.stdout.write("\n"); resolve(buf.trim()); return; }
+        if (ch === "\u0003") { cleanup(); process.stdout.write("\n"); process.exit(130); }     // Ctrl-C
+        if (ch === "\u007f" || ch === "\b") { buf = buf.slice(0, -1); continue; }              // backspace
+        if (ch >= " ") buf += ch;                                                              // printable: captured, not echoed
+      }
+    };
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding("utf8");
+    stdin.on("data", onData);
+  });
+}
+
+// A masked prompt for secrets (the Whoop account password). Same look as
+// `prompt`, but nothing you type is shown.
+export async function promptHidden(question: string): Promise<string> {
+  return askHidden(`${c.violet("?")} ${c.white(question)}${c.gray(" ›")} `);
 }
 
 // Enter — and ANY answer that isn't an explicit "no" — proceeds when `defaultYes`

@@ -128,6 +128,26 @@ function pushTokens(t: DeployTarget, accessToken: string, refreshToken: string):
   }
 }
 
+// Masked question — the typed password is never echoed to the screen (so it
+// can't be read off a recording / over a shoulder). Only the prompt and the
+// commit newline are written; per-character echoes are swallowed.
+async function questionHidden(rl: ReturnType<typeof createInterface>, query: string): Promise<string> {
+  // Write the prompt ourselves, swallow ALL readline echo (no redraw can leak
+  // the secret), then RESTORE echo — the same readline handles the visible MFA
+  // prompt afterward.
+  process.stdout.write(query);
+  const out = rl as unknown as { _writeToOutput?: (s: string) => void };
+  const orig = out._writeToOutput?.bind(rl);
+  out._writeToOutput = (): void => {};
+  try {
+    const answer = (await rl.question("")).trim();
+    process.stdout.write("\n");
+    return answer;
+  } finally {
+    if (orig) out._writeToOutput = orig;
+  }
+}
+
 async function main(): Promise<void> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   // Ctrl-C at any prompt: readline swallows SIGINT, so exit explicitly.
@@ -137,7 +157,7 @@ async function main(): Promise<void> {
   let email = process.env.WHOOP_EMAIL ?? readEnv("WHOOP_EMAIL");
   if (!email) { email = (await rl.question("Your Whoop account email: ")).trim(); if (email) upsertEnv({ WHOOP_EMAIL: email }); }
   let password = process.env.WHOOP_PASSWORD ?? readEnv("WHOOP_PASSWORD");
-  if (!password) { password = (await rl.question("Your Whoop account password (stored in local .env, used once): ")).trim(); if (password) upsertEnv({ WHOOP_PASSWORD: password }); }
+  if (!password) { password = await questionHidden(rl, "Your Whoop account password (stored in local .env, used once): "); if (password) upsertEnv({ WHOOP_PASSWORD: password }); }
   if (!email || !password) { console.error("Email + password are required."); rl.close(); process.exit(1); }
 
   const tokensOnly = process.env.WHOOP_AUTH_TOKENS_ONLY === "1";
