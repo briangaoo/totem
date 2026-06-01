@@ -7,6 +7,7 @@ import { METRICS } from "../../schemas/trend.js";
 import { WhoopProjectionError } from "../../whoop/errors.js";
 import { jsonOut } from "../../whoop/json_out.js";
 import { todayIso } from "../../lib/dates.js";
+import { runPaced } from "../../lib/concurrency.js";
 
 const COMPARE_METRICS = ["RECOVERY", "SLEEP_PERFORMANCE", "DAY_STRAIN", "HRV", "RHR"] as const;
 type CompareMetric = typeof COMPARE_METRICS[number];
@@ -30,11 +31,14 @@ export function registerCompare(server: McpServer, client: WhoopClient): void {
       const offsetDays = window === "week" ? 7 : 30;
       const b = end_b ?? dateBefore(a, offsetDays);
 
-      const flatResults = await Promise.all(
+      // Up to 10 trend calls — paced (≤3 at a time, small jitter) rather than
+      // fired as one simultaneous burst, which no real app screen produces.
+      const flatResults = await runPaced(
         metrics.flatMap((m: CompareMetric) => [
-          client.get(`/progression-service/v3/trends/${m}`, { endDate: a }).then((r) => ({ m, end: a, r })),
-          client.get(`/progression-service/v3/trends/${m}`, { endDate: b }).then((r) => ({ m, end: b, r })),
+          () => client.get(`/progression-service/v3/trends/${m}`, { endDate: a }).then((r) => ({ m, end: a, r })),
+          () => client.get(`/progression-service/v3/trends/${m}`, { endDate: b }).then((r) => ({ m, end: b, r })),
         ]),
+        { concurrency: 3, jitterMaxMs: 150 },
       );
 
       const projected: CompareMetricRow[] = metrics.map((m: CompareMetric) => {

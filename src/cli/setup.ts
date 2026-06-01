@@ -6,7 +6,7 @@
 // the resulting URL, sets PUBLIC_URL, and verifies /health + OAuth are live — no
 // copy-paste. Custom is a printed Docker guide for any other host or your own
 // server. Either way it's one command to a working, Claude-connected deployment.
-import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { resolve, dirname } from "node:path";
@@ -39,7 +39,21 @@ function upsertEnv(root: string, updates: Record<string, string>): void {
     if (idx >= 0) lines[idx] = `${k}=${v}`;
     else lines.push(`${k}=${v}`);
   }
-  writeFileSync(p, lines.join("\n"));
+  // 0600 — this file holds the refresh token (and, transiently, the password).
+  writeFileSync(p, lines.join("\n"), { mode: 0o600 });
+  try { chmodSync(p, 0o600); } catch { /* best-effort */ }
+}
+
+// A user-chosen connector password gates public web/mobile access to the
+// account. Require length + ≥2 character classes and reject obvious choices.
+// (Pressing Enter for the auto-generated 18-char option is always strong.)
+function weakPassword(pw: string): string | null {
+  if (pw.length < 16) return "Use at least 16 characters (or press Enter to auto-generate).";
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((re) => re.test(pw)).length;
+  if (classes < 2) return "Mix at least two of: lower, upper, digits, symbols (or press Enter to auto-generate).";
+  if (/^(.)\1+$/.test(pw)) return "That's a single repeated character — pick something stronger.";
+  if (/^(password|whoop|123456|qwerty|letmein)/i.test(pw)) return "That's too guessable — pick something stronger.";
+  return null;
 }
 
 // Record of where we deployed, so `auth` can push rotated tokens to the right
@@ -490,20 +504,23 @@ export async function runCloudSetup(root: string): Promise<number> {
   const mcpToken = genToken();
   console.log(`  MCP_AUTH_TOKEN: ${c.gray(mcpToken.slice(0, 12) + "… (generated)")}`);
   console.log(c.gray("  Connector password — you'll paste this into Claude once when adding the server."));
-  console.log(c.gray("  Press Enter to auto-generate a secure 18-char one, or type your own (min 12)."));
+  console.log(c.gray("  Press Enter to auto-generate a secure 18-char one, or type your own (min 16)."));
   const useGenerated = (pw: string): string => {
     const copied = copyToClipboard(pw);
     console.log(`  ${c.green("✓")} generated: ${c.bold(pw)}${copied ? c.green("   ✓ copied to clipboard") : c.gray("   (copy it now)")}`);
+    if (copied) console.log(c.gray("    (clear your clipboard after pasting — clipboard-history apps retain it)"));
     return pw;
   };
   let password = await prompt("Password (Enter = auto-generate)");
   if (password === "") {
     password = useGenerated(genPassword(18));
   } else {
-    while (password.length < 12) {
-      console.log(c.red("  Use at least 12 characters (or press Enter to auto-generate)."));
+    let why = weakPassword(password);
+    while (why) {
+      console.log(c.red(`  ${why}`));
       password = await prompt("Password (Enter = auto-generate)");
       if (password === "") { password = useGenerated(genPassword(18)); break; }
+      why = weakPassword(password);
     }
   }
 
@@ -583,7 +600,12 @@ async function verifyDeployment(baseUrl: string): Promise<boolean> {
   const prm = await withSpinner("checking OAuth metadata", () => httpGet(`${root}/.well-known/oauth-protected-resource/mcp`, 5000));
   const prmOk = prm.status === 200 && prm.body.includes("/mcp");
   console.log(`  OAuth metadata: ${prmOk ? c.green("✓") : c.red("not found")}`);
-  return healthy && prmOk;
+  // Prove the auth gate is live: an unauthenticated /mcp must be REJECTED (401),
+  // not served. Catches a regression that left the endpoint open to the public.
+  const gate = await withSpinner("checking /mcp is auth-gated", () => httpGet(`${root}/mcp`, 5000));
+  const gated = gate.status === 401;
+  console.log(`  /mcp auth gate: ${gated ? c.green("401 ✓ (rejects unauthenticated)") : c.red(`${gate.status || "no response"} — expected 401`)}`);
+  return healthy && prmOk && gated;
 }
 
 function printConnectInstructions(url: string, password: string): void {
@@ -715,11 +737,13 @@ async function deployFly(ctx: DeployCtx): Promise<string | null> {
     ``,
   ].join("\n"));
   // Set secrets (staged; applied on deploy) — surface the error if it fails.
-  const secretArgs = Object.entries(env).map(([k, v]) => `${k}=${v}`);
-  const stage = await withSpinner("staging secrets", () => captureAsync(fly, ["secrets", "set", ...secretArgs, "--app", ctx.appName, "--stage"], { cwd: ctx.root }));
+  // `secrets import` reads KEY=val from stdin, keeping the token + password
+  // values off the argv (which any local user could read via `ps`/`/proc`).
+  const secretLines = Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
+  const stage = await withSpinner("staging secrets", () => captureAsync(fly, ["secrets", "import", "--stage", "--app", ctx.appName], { cwd: ctx.root, input: secretLines }));
   if (stage.code !== 0) {
     console.log(c.yellow(`  staging secrets failed (${lastLine(stage)}) — applying directly`));
-    const direct = await withSpinner("setting secrets", () => captureAsync(fly, ["secrets", "set", ...secretArgs, "--app", ctx.appName], { cwd: ctx.root }));
+    const direct = await withSpinner("setting secrets", () => captureAsync(fly, ["secrets", "import", "--app", ctx.appName], { cwd: ctx.root, input: secretLines }));
     if (direct.code !== 0) console.log(c.red(`  ✗ couldn't set secrets: ${lastLine(direct)}`));
   }
   // Build + deploy — error visible (inherited stdio) + retry-on-failure.

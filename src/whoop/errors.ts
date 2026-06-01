@@ -16,7 +16,10 @@ export class WhoopApiError extends Error {
     public readonly body: string,
     description?: string,
   ) {
-    super(`Whoop API error ${status} on ${path}: ${description ?? body.slice(0, 200)}`);
+    // Keep the raw body on `.body` for debugging, but keep it OUT of the
+    // human/AI-facing message: a 4xx body can carry a fragment of health data,
+    // and this message surfaces to the model and stderr.
+    super(`Whoop API error ${status} on ${path}${description ? `: ${description}` : ""}`);
     this.name = "WhoopApiError";
   }
 }

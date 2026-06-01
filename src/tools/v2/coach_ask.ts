@@ -4,6 +4,7 @@ import type { WhoopClient } from "../../whoop/client.js";
 import { CoachAskOut } from "../../schemas/coach.js";
 import { preview } from "../../whoop/write_safety.js";
 import { jsonOut } from "../../whoop/json_out.js";
+import { randomInt } from "node:crypto";
 
 export function registerCoachAsk(server: McpServer, client: WhoopClient): void {
   server.tool(
@@ -101,7 +102,9 @@ export function registerCoachAsk(server: McpServer, client: WhoopClient): void {
       let responseText: string | null = null;
       let stableFor = 0;
       for (; polled < 30; polled++) {
-        await new Promise((r) => setTimeout(r, 1000));
+        // Jittered, not a fixed 1.000s metronome — a perfectly periodic poll is
+        // a scripted-client tell. ~0.85–1.4s keeps the 30s budget intact.
+        await new Promise((r) => setTimeout(r, randomInt(850, 1400)));
         const r = await client.get<Record<string, unknown>>(
           `/ai-conversation-bff/v1/conversation/${conversationId}/turn/${turnId}`,
         );

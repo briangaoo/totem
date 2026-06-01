@@ -16,7 +16,7 @@
 //   PUBLIC_URL=https://...    (optional; the server's public origin, used as the
 //                              OAuth issuer. Defaults to http://localhost:<port>)
 import express, { type Request, type Response } from "express";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHmac } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
@@ -46,11 +46,19 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
   // is known) must fall back to localhost, not become `new URL("")` → boot crash.
   const publicUrl = process.env.PUBLIC_URL || `http://localhost:${port}`;
   const oauthEnabled = password.length > 0;
+  const resourceUrl = `${publicUrl.replace(/\/$/, "")}/mcp`;
+  // Sign OAuth JWTs with a key DERIVED from MCP_AUTH_TOKEN, not the token itself
+  // — so the long-lived static bearer and the JWT signing secret aren't the same
+  // string in two roles (leaking one shouldn't let you forge the other).
+  const signingSecret = createHmac("sha256", opts.authToken)
+    .update("whoop-mcp/oauth-jwt-signing/v1")
+    .digest("hex");
 
   const provider = new WhoopOAuthProvider({
-    signingSecret: opts.authToken,
+    signingSecret,
     password,
     staticToken: opts.authToken,
+    resourceUrl,
   });
 
   // One McpServer + transport pair per active session (MCP spec: a server can't
@@ -65,7 +73,7 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
       if (existing) return existing;
     }
     const newId = randomUUID();
-    const newServer = new McpServer({ name: "whoop", version: "1.2.2" });
+    const newServer = new McpServer({ name: "whoop", version: "1.2.3" });
     registerTools(newServer, client);
     const newTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => newId,
@@ -88,6 +96,19 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
   // express-rate-limit as too permissive — clients could spoof X-Forwarded-For
   // — so we use the hop count instead.
   app.set("trust proxy", 1);
+
+  // Security headers on every response. The /authorize consent page is a
+  // password form — deny framing (clickjacking) and lock down what it can load.
+  app.use((_req, res, next) => {
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    );
+    next();
+  });
 
   // CORS — a browser-based MCP client (or the OAuth redirect dance) may hit this.
   app.use((req, res, next) => {
@@ -117,7 +138,7 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
   // refuses to connect. Setting it to /mcp also serves the metadata at the
   // RFC 9728 path-specific location /.well-known/oauth-protected-resource/mcp.
   const issuerUrl = new URL(publicUrl);
-  const resourceServerUrl = new URL(`${publicUrl.replace(/\/$/, "")}/mcp`);
+  const resourceServerUrl = new URL(resourceUrl);
   app.use(mcpAuthRouter({ provider, issuerUrl, resourceServerUrl }));
 
   // Brute-force guard for the password gate: this consent route is custom and
@@ -126,6 +147,13 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
   const consentHits = new Map<string, { count: number; resetAt: number }>();
   const CONSENT_MAX = 10;
   const CONSENT_WINDOW_MS = 15 * 60 * 1000;
+  // Global failed-password ceiling — a backstop that does NOT depend on the
+  // spoofable per-IP key (X-Forwarded-For). Counts wrong passwords across ALL
+  // IPs and trips a site-wide cooldown, so a distributed / IP-rotating guesser
+  // can't dilute the per-IP limiter.
+  let globalFails = 0;
+  let globalResetAt = 0;
+  const GLOBAL_FAIL_MAX = 50;
 
   // Password-gate handler for the /authorize step. The form rendered by
   // provider.authorize() POSTs here; we validate the password, mint an auth
@@ -137,6 +165,12 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
     }
     const ip = req.ip ?? "unknown";
     const now = Date.now();
+    // Global cooldown (IP-independent) — trips before the per-IP check.
+    if (now > globalResetAt) { globalFails = 0; globalResetAt = now + CONSENT_WINDOW_MS; }
+    if (globalFails >= GLOBAL_FAIL_MAX) {
+      res.status(429).json({ error: "too_many_requests", error_description: "Too many failed attempts — wait 15 minutes." });
+      return;
+    }
     const hit = consentHits.get(ip);
     if (!hit || now > hit.resetAt) {
       consentHits.set(ip, { count: 1, resetAt: now + CONSENT_WINDOW_MS });
@@ -155,7 +189,9 @@ export async function startHttpServer(client: WhoopClient, opts: HttpServerOptio
       password: body.password ?? "",
     });
     if (!redirect) {
-      // Wrong password (or bad client) — re-render the form with an error.
+      // Wrong password (or bad client) — count it toward the global ceiling and
+      // re-render the form with an error.
+      globalFails++;
       res.status(401).setHeader("content-type", "text/html; charset=utf-8");
       res.end(renderConsentForm({
         clientId: body.client_id ?? "",

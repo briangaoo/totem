@@ -6,6 +6,7 @@ import { projectLiftHistory } from "../../projections/lift_history.js";
 import { WhoopProjectionError } from "../../whoop/errors.js";
 import { jsonOut } from "../../whoop/json_out.js";
 import { rangeFromDays } from "../../lib/dates.js";
+import { runPaced } from "../../lib/concurrency.js";
 
 export function registerLiftHistory(server: McpServer, client: WhoopClient): void {
   server.tool(
@@ -30,10 +31,13 @@ export function registerLiftHistory(server: McpServer, client: WhoopClient): voi
         .filter((r) => r.sport_name && /weight|strength|powerlift/i.test(r.sport_name))
         .slice(0, limit)
         .map((r) => r.id);
-      const details = await Promise.all(
+      // Up to 20 detail calls — paced (≤3 at a time, small jitter) instead of a
+      // single simultaneous burst.
+      const details = await runPaced(
         strengthIds.map((id) =>
-          client.get(`/core-details-bff/v1/cardio-details`, { activityId: id }).catch(() => ({})),
+          () => client.get(`/core-details-bff/v1/cardio-details`, { activityId: id }).catch(() => ({})),
         ),
+        { concurrency: 3, jitterMaxMs: 150 },
       );
       const projected = projectLiftHistory({ workouts, details });
       try {

@@ -10,7 +10,7 @@
 // When invoked as a sub-step of `whoop-mcp cloud` / `local` (which handle the
 // deploy themselves), set WHOOP_AUTH_TOKENS_ONLY=1 to skip the push step.
 import "dotenv/config";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
@@ -34,7 +34,18 @@ function upsertEnv(updates: Record<string, string>): void {
     if (idx >= 0) lines[idx] = entry;
     else lines.push(entry);
   }
-  writeFileSync(ENV_PATH, lines.join("\n"));
+  // 0600 — holds the refresh token (and, transiently, the password).
+  writeFileSync(ENV_PATH, lines.join("\n"), { mode: 0o600 });
+  try { chmodSync(ENV_PATH, 0o600); } catch { /* best-effort */ }
+}
+
+// Remove keys from .env (used to wipe the one-time password after bootstrap).
+function deleteEnvKeys(keys: string[]): void {
+  if (!existsSync(ENV_PATH)) return;
+  const lines = readFileSync(ENV_PATH, "utf8").split("\n")
+    .filter((l) => !keys.some((k) => l.startsWith(`${k}=`)));
+  writeFileSync(ENV_PATH, lines.join("\n"), { mode: 0o600 });
+  try { chmodSync(ENV_PATH, 0o600); } catch { /* best-effort */ }
 }
 
 interface DeployTarget {
@@ -91,11 +102,14 @@ function pushTokens(t: DeployTarget, accessToken: string, refreshToken: string):
     case "fly": {
       if (!t.app) { console.error("No Fly app recorded."); manual(); return false; }
       console.log(`Pushing to Fly app '${t.app}'…`);
-      const r = spawnSync("fly", ["secrets", "set",
-        `WHOOP_IOS_BEARER_TOKEN=${accessToken}`,
-        `WHOOP_COGNITO_REFRESH_TOKEN=${refreshToken}`, "-a", t.app], inherit);
+      // `secrets import` reads KEY=val from stdin — keeps the token values off
+      // the argv (which any local user could read from `ps`/`/proc`).
+      const r = spawnSync("fly", ["secrets", "import", "-a", t.app], {
+        input: `WHOOP_IOS_BEARER_TOKEN=${accessToken}\nWHOOP_COGNITO_REFRESH_TOKEN=${refreshToken}\n`,
+        stdio: ["pipe", "inherit", "inherit"],
+      });
       if (r.status === 0) { console.log(`  → done. Test: curl https://${t.app}.fly.dev/health`); return true; }
-      console.error("`fly secrets set` failed (is flyctl installed + `fly auth login` done?)."); manual(); return false;
+      console.error("`fly secrets import` failed (is flyctl installed + `fly auth login` done?)."); manual(); return false;
     }
 
     case "railway": {
@@ -218,6 +232,11 @@ async function main(): Promise<void> {
       if (j.user?.id) { upsertEnv({ WHOOP_USER_ID: String(j.user.id) }); console.log(`  → user_id ${j.user.id} saved.`); }
     }
   } catch { /* optional */ }
+
+  // The account password is only needed for this one bootstrap — every
+  // subsequent refresh uses the refresh token. Don't leave it on disk.
+  deleteEnvKeys(["WHOOP_PASSWORD"]);
+  console.log("  → removed your password from .env (only the tokens are needed now).");
 
   console.log("");
   if (tokensOnly) {

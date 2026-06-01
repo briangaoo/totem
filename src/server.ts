@@ -14,6 +14,7 @@ import { EnvFileTokenStore, MemoryTokenStore, type TokenStore } from "./whoop/to
 import { registerTools } from "./tools/register.js";
 import { startTimezoneAutoDetect } from "./whoop/init_timezone.js";
 import { resolveInstallationId } from "./whoop/installation.js";
+import { versionStaleWarning } from "./whoop/device.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENV_PATH = resolve(__dirname, "../.env");
@@ -27,7 +28,12 @@ function requireEnv(key: string): string {
 
 function chooseStore(): TokenStore {
   const mode = (process.env.WHOOP_TOKEN_STORE ?? "envfile").toLowerCase();
-  if (mode === "memory") return new MemoryTokenStore();
+  if (mode === "memory") {
+    console.error(
+      "[whoop-mcp] WHOOP_TOKEN_STORE=memory: rotated tokens are NOT persisted. If Cognito rotates your refresh token, a restart will need a fresh `whoop-mcp auth`.",
+    );
+    return new MemoryTokenStore();
+  }
   return new EnvFileTokenStore(ENV_PATH);
 }
 
@@ -36,6 +42,11 @@ async function main(): Promise<void> {
   // out, so every data request carries the same `x-whoop-installation-identifier`
   // the iOS app sends. Persisted to the env file like the tokens.
   resolveInstallationId(ENV_PATH);
+
+  // Warn (once, at boot) if the bundled iOS app version has gone stale enough to
+  // become a fingerprintable cohort. No-op until ~6 months past the capture date.
+  const stale = versionStaleWarning();
+  if (stale) console.error(stale);
 
   const tokenManager = new TokenManager({
     email: requireEnv("WHOOP_EMAIL"),
@@ -63,7 +74,7 @@ async function main(): Promise<void> {
   }
 
   // stdio (default — local Claude Desktop / Claude Code)
-  const server = new McpServer({ name: "whoop", version: "1.2.2" });
+  const server = new McpServer({ name: "whoop", version: "1.2.3" });
   registerTools(server, client);
   await server.connect(new StdioServerTransport());
 }

@@ -88,6 +88,10 @@ export interface WhoopOAuthOptions {
   password: string;
   /** Static bearer token (MCP_AUTH_TOKEN) kept working for Claude Code / Desktop bridge. */
   staticToken: string;
+  /** This server's MCP resource URL (…/mcp). When set, a token carrying a
+   *  `resource` claim must match it — so a token minted for a different server
+   *  can't be replayed here (RFC 8707 audience binding). */
+  resourceUrl?: string;
 }
 
 export class WhoopOAuthProvider implements OAuthServerProvider {
@@ -95,11 +99,13 @@ export class WhoopOAuthProvider implements OAuthServerProvider {
   private readonly signingSecret: string;
   private readonly password: string;
   private readonly staticToken: string;
+  private readonly resourceUrl: string | undefined;
 
   constructor(opts: WhoopOAuthOptions) {
     this.signingSecret = opts.signingSecret;
     this.password = opts.password;
     this.staticToken = opts.staticToken;
+    this.resourceUrl = opts.resourceUrl;
   }
 
   // Decode the stateless signed client_id back into client info (synchronous).
@@ -261,6 +267,14 @@ export class WhoopOAuthProvider implements OAuthServerProvider {
     // 2. OAuth-issued JWT.
     const payload = verifyToken(token, this.signingSecret);
     if (payload && payload.typ === "access") {
+      // Audience binding (RFC 8707): a token carrying a `resource` claim is only
+      // valid at the server it was minted for. Trailing-slash tolerant.
+      if (this.resourceUrl && typeof payload.resource === "string") {
+        const norm = (u: string): string => u.replace(/\/+$/, "");
+        if (norm(payload.resource) !== norm(this.resourceUrl)) {
+          throw new InvalidTokenError("token resource does not match this server");
+        }
+      }
       const info: AuthInfo = {
         token,
         clientId: String(payload.cid),

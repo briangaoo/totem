@@ -28,6 +28,19 @@ export const IOS_APP_VERSION = "5.52.0";
 export const IOS_BUILD_NUMBER = "595097";
 export const IOS_BUNDLE_NAME = "com.whoop.iphone";
 
+// When the constants above were captured from a real device. If the bundled
+// version drifts too far behind the live install base it stops being camouflage
+// and becomes a "this one frozen old version" cohort — warn at boot so it gets
+// refreshed. Bump alongside the version/build when you re-capture.
+export const IOS_VERSION_CAPTURED_AT = "2026-05"; // YYYY-MM
+export function versionStaleWarning(maxAgeMonths = 6): string | null {
+  const [y, m] = IOS_VERSION_CAPTURED_AT.split("-").map(Number);
+  if (!y || !m) return null;
+  const ageMonths = (Date.now() - new Date(y, m - 1, 1).getTime()) / (30 * 86_400_000);
+  if (ageMonths < maxAgeMonths) return null;
+  return `[whoop-mcp] bundled WHOOP iOS version (${IOS_APP_VERSION}, captured ${IOS_VERSION_CAPTURED_AT}) is ~${Math.round(ageMonths)} months old — update src/whoop/device.ts to keep blending with the current app install base.`;
+}
+
 // The app sends an uppercase UUID; randomUUID() is lowercase, so we upcase it.
 function newInstallationId(): string {
   return randomUUID().toUpperCase();

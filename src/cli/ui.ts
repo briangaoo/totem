@@ -72,15 +72,23 @@ export function capture(cmd: string, args: string[], opts: SpawnOptions = {}): {
 // loop for the whole subprocess — so a spinner (setInterval) can't animate over
 // it. For slow, network-bound lookups (gcloud/railway/fly API calls) run them
 // through this instead and wrap with withSpinner() so the UI stays alive.
-export function captureAsync(cmd: string, args: string[], opts: SpawnOptions = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+export function captureAsync(
+  cmd: string,
+  args: string[],
+  opts: SpawnOptions & { input?: string } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const { input, ...spawnOpts } = opts;
   return new Promise((res) => {
-    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], ...opts });
+    // input set → pipe stdin so secrets can be fed over a pipe (off the argv,
+    // which is visible in `ps`/`/proc`); otherwise ignore stdin as before.
+    const child = spawn(cmd, args, { stdio: [input !== undefined ? "pipe" : "ignore", "pipe", "pipe"], ...spawnOpts });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
     child.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
     child.on("error", () => res({ code: 1, stdout, stderr }));
     child.on("close", (code) => res({ code: code ?? 1, stdout, stderr }));
+    if (input !== undefined) { child.stdin?.write(input); child.stdin?.end(); }
   });
 }
 
